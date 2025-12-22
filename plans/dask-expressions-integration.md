@@ -4,9 +4,18 @@
 
 This plan describes how to integrate xarray with Dask's new expression-based computation system. The goal is to allow xarray's Dataset and DataArray to participate in Dask's expression optimization pipeline, enabling better performance when computing multiple xarray objects together or mixing xarray with dask arrays.
 
-**Status:** Planning phase
+**Status:** Phase 1 Complete
+
+**Implementation Notes (added during development):**
+
+- Dask automatically uses `.expr` via `collections_to_expr()` - users pass the Dataset/DataArray, not the expression
+- Array expressions need `simplify()` + `lower_completely()` to become executable
+- Tuple operands (like `var_exprs`) require custom `_simplify_down()` since optimizer only recurses into direct Expr operands
+- Feature detection must check that `dask.array.Array` actually has `.expr` (not just that classes exist)
+- Requires `DASK_ARRAY__QUERY_PLANNING=true` config to enable array expressions in dask
 
 **Related resources in dask repository (`../dask3/`):**
+
 - Design doc: `designs/array-expr.md` - Core principles of expression system
 - Base classes: `dask/_expr.py` - `Expr`, `_ExprSequence`, `FinalizeCompute`
 - Array expressions: `dask/array/_array_expr/_expr.py` - `ArrayExpr`, `FinalizeComputeArray`
@@ -34,6 +43,7 @@ User Code → Expression Tree → Optimize → Task Graph → Execute
 ```
 
 Key benefits:
+
 - **Simplification**: Algebraic rewrites (e.g., `arr[5:10][2:3]` → `arr[7:8]`)
 - **Lowering**: Convert logical operations to physical implementations
 - **Fusion**: Combine chains of operations into single tasks
@@ -46,8 +56,8 @@ From `dask/_expr.py`, the essential methods are:
 ```python
 class Expr:
     _parameters: list[str] = []  # Names of operands
-    _defaults: dict = {}         # Default values for optional params
-    operands: list               # Actual operand values
+    _defaults: dict = {}  # Default values for optional params
+    operands: list  # Actual operand values
 
     def dependencies(self) -> list[Expr]:
         """Return Expr operands (for tree traversal)."""
@@ -91,7 +101,7 @@ class Expr:
     def _lower(self) -> Expr | None: ...
 ```
 
-### How _ExprSequence Works
+### How \_ExprSequence Works
 
 When computing multiple collections together:
 
@@ -117,6 +127,7 @@ def collections_to_expr(collections, optimize_graph=True):
 ```
 
 `_ExprSequence` (in `dask/_expr.py:1198`) holds multiple expressions and:
+
 - Merges their layers in `_layer()`
 - Returns nested keys in `__dask_keys__()`: `[[expr1_keys], [expr2_keys], ...]`
 - Applies finalization to each in `finalize_compute()`
@@ -142,6 +153,7 @@ DatasetExpr              DataArrayExpr
 ```
 
 When `dask.compute(dataset)` is called:
+
 1. `collections_to_expr` calls `dataset.expr`
 2. Returns `DatasetExpr` containing all variable expressions
 3. Optimizer sees all expressions together
@@ -170,12 +182,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from xarray import DataArray, Dataset
 
+
 # Check for expression support
 def _has_expr_support() -> bool:
     """Check if dask has expression support."""
     try:
         from dask._expr import Expr
         from dask.array._array_expr._expr import ArrayExpr
+
         return True
     except ImportError:
         return False
@@ -189,7 +203,6 @@ if HAS_EXPR_SUPPORT:
     from dask._expr import Expr
     from dask._task_spec import DataNode, Task, TaskRef, List as TaskList
     from dask.base import tokenize
-
 
     class DatasetExpr(Expr):
         """Expression representing an xarray Dataset with chunked variables.
@@ -222,16 +235,22 @@ if HAS_EXPR_SUPPORT:
         """
 
         _parameters = [
-            "var_names", "var_exprs",
-            "coord_names", "coord_exprs",
-            "non_chunked_vars", "non_chunked_coords",
-            "dims", "var_dims", "attrs", "indexes"
+            "var_names",
+            "var_exprs",
+            "coord_names",
+            "coord_exprs",
+            "non_chunked_vars",
+            "non_chunked_coords",
+            "dims",
+            "var_dims",
+            "attrs",
+            "indexes",
         ]
         _defaults = {
             "non_chunked_vars": {},
             "non_chunked_coords": {},
             "attrs": None,
-            "indexes": None
+            "indexes": None,
         }
 
         @functools.cached_property
@@ -256,10 +275,10 @@ if HAS_EXPR_SUPPORT:
             """Merge layers from all constituent expressions."""
             layers = {}
             for expr in self.var_exprs:
-                if hasattr(expr, '_layer'):
+                if hasattr(expr, "_layer"):
                     layers.update(expr._layer())
             for expr in self.coord_exprs:
-                if hasattr(expr, '_layer'):
+                if hasattr(expr, "_layer"):
                     layers.update(expr._layer())
             return layers
 
@@ -282,12 +301,12 @@ if HAS_EXPR_SUPPORT:
             return DatasetExprFinalize(
                 var_names=self.var_names,
                 var_exprs=tuple(
-                    e.finalize_compute() if hasattr(e, 'finalize_compute') else e
+                    e.finalize_compute() if hasattr(e, "finalize_compute") else e
                     for e in self.var_exprs
                 ),
                 coord_names=self.coord_names,
                 coord_exprs=tuple(
-                    e.finalize_compute() if hasattr(e, 'finalize_compute') else e
+                    e.finalize_compute() if hasattr(e, "finalize_compute") else e
                     for e in self.coord_exprs
                 ),
                 non_chunked_vars=self.non_chunked_vars,
@@ -318,7 +337,6 @@ if HAS_EXPR_SUPPORT:
             # Start with no optimizations, add later as needed
             return None
 
-
     class DatasetExprFinalize(Expr):
         """Handles reconstruction of Dataset after compute.
 
@@ -327,16 +345,22 @@ if HAS_EXPR_SUPPORT:
         """
 
         _parameters = [
-            "var_names", "var_exprs",
-            "coord_names", "coord_exprs",
-            "non_chunked_vars", "non_chunked_coords",
-            "dims", "var_dims", "attrs", "indexes"
+            "var_names",
+            "var_exprs",
+            "coord_names",
+            "coord_exprs",
+            "non_chunked_vars",
+            "non_chunked_coords",
+            "dims",
+            "var_dims",
+            "attrs",
+            "indexes",
         ]
         _defaults = {
             "non_chunked_vars": {},
             "non_chunked_coords": {},
             "attrs": None,
-            "indexes": None
+            "indexes": None,
         }
 
         @functools.cached_property
@@ -365,6 +389,7 @@ if HAS_EXPR_SUPPORT:
                 else:
                     # Flatten nested keys
                     from dask.base import flatten
+
                     var_keys.extend(flatten(keys))
 
             coord_keys = []
@@ -374,15 +399,16 @@ if HAS_EXPR_SUPPORT:
                     coord_keys.append(keys[0])
                 else:
                     from dask.base import flatten
+
                     coord_keys.extend(flatten(keys))
 
             # Merge underlying layers
             layers = {}
             for expr in self.var_exprs:
-                if hasattr(expr, '_layer'):
+                if hasattr(expr, "_layer"):
                     layers.update(expr._layer())
             for expr in self.coord_exprs:
-                if hasattr(expr, '_layer'):
+                if hasattr(expr, "_layer"):
                     layers.update(expr._layer())
 
             # Add reconstruction task
@@ -407,7 +433,6 @@ if HAS_EXPR_SUPPORT:
             return [self._name]
 
         # Note: __dask_graph__ inherited from Expr - will include _layer() with reconstruction task
-
 
     def _reconstruct_dataset(
         computed_arrays: list,
@@ -450,7 +475,6 @@ if HAS_EXPR_SUPPORT:
 
         return xr.Dataset(data_vars, coords=coords, attrs=attrs)
 
-
     class DataArrayExpr(Expr):
         """Expression representing an xarray DataArray with chunked data.
 
@@ -458,16 +482,15 @@ if HAS_EXPR_SUPPORT:
         """
 
         _parameters = [
-            "name", "data_expr",
-            "coord_names", "coord_exprs",
+            "name",
+            "data_expr",
+            "coord_names",
+            "coord_exprs",
             "non_chunked_coords",
-            "dims", "attrs"
+            "dims",
+            "attrs",
         ]
-        _defaults = {
-            "name": None,
-            "non_chunked_coords": {},
-            "attrs": None
-        }
+        _defaults = {"name": None, "non_chunked_coords": {}, "attrs": None}
 
         @functools.cached_property
         def _name(self) -> str:
@@ -484,10 +507,10 @@ if HAS_EXPR_SUPPORT:
 
         def _layer(self) -> dict:
             layers = {}
-            if hasattr(self.data_expr, '_layer'):
+            if hasattr(self.data_expr, "_layer"):
                 layers.update(self.data_expr._layer())
             for expr in self.coord_exprs:
-                if hasattr(expr, '_layer'):
+                if hasattr(expr, "_layer"):
                     layers.update(expr._layer())
             return layers
 
@@ -504,12 +527,12 @@ if HAS_EXPR_SUPPORT:
                 name=self.name,
                 data_expr=(
                     self.data_expr.finalize_compute()
-                    if hasattr(self.data_expr, 'finalize_compute')
+                    if hasattr(self.data_expr, "finalize_compute")
                     else self.data_expr
                 ),
                 coord_names=self.coord_names,
                 coord_exprs=tuple(
-                    e.finalize_compute() if hasattr(e, 'finalize_compute') else e
+                    e.finalize_compute() if hasattr(e, "finalize_compute") else e
                     for e in self.coord_exprs
                 ),
                 non_chunked_coords=self.non_chunked_coords,
@@ -517,21 +540,19 @@ if HAS_EXPR_SUPPORT:
                 attrs=self.attrs,
             )
 
-
     class DataArrayExprFinalize(Expr):
         """Handles reconstruction of DataArray after compute."""
 
         _parameters = [
-            "name", "data_expr",
-            "coord_names", "coord_exprs",
+            "name",
+            "data_expr",
+            "coord_names",
+            "coord_exprs",
             "non_chunked_coords",
-            "dims", "attrs"
+            "dims",
+            "attrs",
         ]
-        _defaults = {
-            "name": None,
-            "non_chunked_coords": {},
-            "attrs": None
-        }
+        _defaults = {"name": None, "non_chunked_coords": {}, "attrs": None}
 
         @functools.cached_property
         def _name(self) -> str:
@@ -553,7 +574,10 @@ if HAS_EXPR_SUPPORT:
                 data_key = data_keys[0]
             else:
                 from dask.base import flatten
-                data_key = list(flatten(data_keys))[0]  # Should be single after finalize
+
+                data_key = list(flatten(data_keys))[
+                    0
+                ]  # Should be single after finalize
 
             coord_keys = []
             for expr in self.coord_exprs:
@@ -562,14 +586,15 @@ if HAS_EXPR_SUPPORT:
                     coord_keys.append(keys[0])
                 else:
                     from dask.base import flatten
+
                     coord_keys.extend(flatten(keys))
 
             # Merge underlying layers
             layers = {}
-            if hasattr(self.data_expr, '_layer'):
+            if hasattr(self.data_expr, "_layer"):
                 layers.update(self.data_expr._layer())
             for expr in self.coord_exprs:
-                if hasattr(expr, '_layer'):
+                if hasattr(expr, "_layer"):
                     layers.update(expr._layer())
 
             # Reconstruction task
@@ -591,7 +616,6 @@ if HAS_EXPR_SUPPORT:
             return [self._name]
 
         # Note: __dask_graph__ inherited from Expr
-
 
     def _reconstruct_dataarray(
         data: Any,
@@ -698,7 +722,7 @@ class Dataset:
             var_dims[name] = dims
 
             # Check if variable is chunked
-            if hasattr(var._data, 'expr'):
+            if hasattr(var._data, "expr"):
                 # Dask array with expression support
                 expr = var._data.expr
                 if is_coord:
@@ -707,7 +731,7 @@ class Dataset:
                 else:
                     var_names.append(name)
                     var_exprs.append(expr)
-            elif hasattr(var._data, '__dask_graph__'):
+            elif hasattr(var._data, "__dask_graph__"):
                 # Dask array without expression (older dask?)
                 # Could wrap in HLGExpr, or raise
                 raise ValueError(
@@ -756,15 +780,11 @@ class DataArray:
         from xarray.core.dask_expr import DataArrayExpr, HAS_EXPR_SUPPORT
 
         if not HAS_EXPR_SUPPORT:
-            raise ImportError(
-                "Dask expression support requires dask >= X.Y.Z."
-            )
+            raise ImportError("Dask expression support requires dask >= X.Y.Z.")
 
-        if not hasattr(self.variable._data, 'expr'):
-            if hasattr(self.variable._data, '__dask_graph__'):
-                raise ValueError(
-                    "DataArray has dask data without expression support."
-                )
+        if not hasattr(self.variable._data, "expr"):
+            if hasattr(self.variable._data, "__dask_graph__"):
+                raise ValueError("DataArray has dask data without expression support.")
             raise ValueError(
                 "DataArray is not chunked. Use .expr only with dask-backed DataArrays."
             )
@@ -775,7 +795,7 @@ class DataArray:
         non_chunked_coords = {}
 
         for name, coord in self.coords.items():
-            if hasattr(coord.variable._data, 'expr'):
+            if hasattr(coord.variable._data, "expr"):
                 coord_names.append(name)
                 coord_exprs.append(coord.variable._data.expr)
             else:
@@ -797,61 +817,49 @@ class DataArray:
 
 ## Implementation Phases
 
-### Phase 1: Core Expression Classes
+### Phase 1: Core Expression Classes ✓ COMPLETE
 
-**Files to create:**
+**Files created:**
+
 - `xarray/core/dask_expr.py` - Expression classes
+- `xarray/tests/test_dask_expr.py` - 17 tests
 
-**Files to modify:**
-- `xarray/core/dataset.py` - Add `.expr` property
-- `xarray/core/dataarray.py` - Add `.expr` property
+**Files modified:**
 
-**Tasks:**
-1. Create `dask_expr.py` with `DatasetExpr`, `DataArrayExpr`, and finalize classes
-2. Add feature detection (`HAS_EXPR_SUPPORT`)
-3. Add `.expr` property to Dataset
-4. Add `.expr` property to DataArray
+- `xarray/core/dataset.py` - Added `.expr` property (lines 634-736)
+- `xarray/core/dataarray.py` - Added `.expr` property (lines 1105-1151)
 
-### Phase 2: Testing
+**What was implemented:**
 
-**Files to create:**
-- `xarray/tests/test_dask_expr.py`
+1. `DatasetExpr` / `DatasetExprFinalize` - container + reconstruction
+2. `DataArrayExpr` / `DataArrayExprFinalize` - container + reconstruction
+3. `HAS_EXPR_SUPPORT` - checks if dask.array has functional `.expr`
+4. `.expr` properties on Dataset and DataArray
+5. `_simplify_down()` to handle tuple operands and lower array expressions
 
-**Test cases:**
-1. Basic compute with Dataset.expr
-2. Basic compute with DataArray.expr
-3. Joint compute: `dask.compute(dataset, dask_array)`
-4. Shared subexpressions are preserved
-5. Non-chunked variables/coords handled correctly
-6. Attributes preserved through compute
-7. Works with various chunk patterns
-8. Error handling for non-dask data
-9. Error handling for older dask versions
+**Key insight:** The integration is automatic - `dask.compute(ds)` uses `.expr` via `collections_to_expr()`. Users don't need to explicitly access `.expr`.
+
+### Phase 2: Testing ✓ COMPLETE
+
+**Test coverage (17 tests):**
+
+- Basic compute for Dataset and DataArray
+- Multiple variables
+- Attributes preservation
+- Non-chunked variables/coords
+- Chunked coordinates
+- Error handling for non-dask data
+- Joint optimization with dask arrays
+- Multiple datasets together
+- Shared subexpression deduplication
+
+**To run tests:** `DASK_ARRAY__QUERY_PLANNING=true PYTHONPATH=../dask3 pytest xarray/tests/test_dask_expr.py`
 
 ### Phase 3: Integration with Existing Dask Protocol
 
-**Consider:**
-- Should `.expr` be used automatically by `__dask_graph__`?
-- Interaction with `__dask_postcompute__` and `__dask_postpersist__`
-- Backward compatibility with older dask versions
+**Current status:** Using automatic integration via `.expr` property. Dask's `collections_to_expr()` checks for `.expr` attribute and uses it when present.
 
-**Option A:** Keep existing protocol methods, `.expr` is opt-in
-```python
-# User explicitly uses .expr for optimization
-dask.compute(ds.expr, arr)
-```
-
-**Option B:** Have `__dask_graph__` delegate to `.expr` when available
-```python
-def __dask_graph__(self):
-    if HAS_EXPR_SUPPORT:
-        return self.expr.__dask_graph__()
-    else:
-        # Existing HLG-based implementation
-        ...
-```
-
-**Recommendation:** Start with Option A (opt-in), move to Option B after validation.
+**Note:** The original plan suggested "Option A" (explicit `ds.expr`), but the actual dask implementation uses `.expr` automatically when the collection has it. Users just call `dask.compute(ds)` as before.
 
 ### Phase 4: Optimizations (Future)
 
@@ -880,8 +888,7 @@ da = pytest.importorskip("dask.array")
 from xarray.core.dask_expr import HAS_EXPR_SUPPORT
 
 pytestmark = pytest.mark.skipif(
-    not HAS_EXPR_SUPPORT,
-    reason="Requires dask with expression support"
+    not HAS_EXPR_SUPPORT, reason="Requires dask with expression support"
 )
 
 
@@ -890,14 +897,14 @@ class TestDatasetExpr:
         import xarray as xr
 
         data = da.ones((10, 10), chunks=5)
-        ds = xr.Dataset({'a': (['x', 'y'], data)})
+        ds = xr.Dataset({"a": (["x", "y"], data)})
 
         expr = ds.expr
         result = dask.compute(expr)[0]
 
         assert isinstance(result, xr.Dataset)
-        assert 'a' in result
-        np.testing.assert_array_equal(result['a'].values, np.ones((10, 10)))
+        assert "a" in result
+        np.testing.assert_array_equal(result["a"].values, np.ones((10, 10)))
 
     def test_joint_optimization(self):
         import xarray as xr
@@ -905,10 +912,12 @@ class TestDatasetExpr:
         # Create shared base array
         base = da.random.random((100, 100), chunks=50)
 
-        ds = xr.Dataset({
-            'a': (['x', 'y'], base * 2),
-            'b': (['x', 'y'], base + 1),
-        })
+        ds = xr.Dataset(
+            {
+                "a": (["x", "y"], base * 2),
+                "b": (["x", "y"], base + 1),
+            }
+        )
 
         # Compute together - shared 'base' should be computed once
         result_ds, result_mean = dask.compute(ds.expr, base.mean())
@@ -920,13 +929,10 @@ class TestDatasetExpr:
         import xarray as xr
 
         data = da.ones((10,), chunks=5)
-        ds = xr.Dataset(
-            {'a': (['x'], data)},
-            attrs={'description': 'test dataset'}
-        )
+        ds = xr.Dataset({"a": (["x"], data)}, attrs={"description": "test dataset"})
 
         result = dask.compute(ds.expr)[0]
-        assert result.attrs['description'] == 'test dataset'
+        assert result.attrs["description"] == "test dataset"
 
     def test_non_chunked_variables(self):
         import xarray as xr
@@ -934,15 +940,17 @@ class TestDatasetExpr:
         chunked = da.ones((10,), chunks=5)
         non_chunked = np.array([1, 2, 3])
 
-        ds = xr.Dataset({
-            'chunked': (['x'], chunked),
-            'non_chunked': (['y'], non_chunked),
-        })
+        ds = xr.Dataset(
+            {
+                "chunked": (["x"], chunked),
+                "non_chunked": (["y"], non_chunked),
+            }
+        )
 
         result = dask.compute(ds.expr)[0]
 
-        np.testing.assert_array_equal(result['chunked'].values, np.ones(10))
-        np.testing.assert_array_equal(result['non_chunked'].values, [1, 2, 3])
+        np.testing.assert_array_equal(result["chunked"].values, np.ones(10))
+        np.testing.assert_array_equal(result["non_chunked"].values, [1, 2, 3])
 
     def test_coordinates_preserved(self):
         import xarray as xr
@@ -951,20 +959,17 @@ class TestDatasetExpr:
         x_coord = da.arange(10, chunks=5)
         y_coord = np.arange(10)  # Non-chunked coord
 
-        ds = xr.Dataset(
-            {'a': (['x', 'y'], data)},
-            coords={'x': x_coord, 'y': y_coord}
-        )
+        ds = xr.Dataset({"a": (["x", "y"], data)}, coords={"x": x_coord, "y": y_coord})
 
         result = dask.compute(ds.expr)[0]
 
-        np.testing.assert_array_equal(result.coords['x'].values, np.arange(10))
-        np.testing.assert_array_equal(result.coords['y'].values, np.arange(10))
+        np.testing.assert_array_equal(result.coords["x"].values, np.arange(10))
+        np.testing.assert_array_equal(result.coords["y"].values, np.arange(10))
 
     def test_error_non_dask_dataset(self):
         import xarray as xr
 
-        ds = xr.Dataset({'a': (['x'], np.ones(10))})
+        ds = xr.Dataset({"a": (["x"], np.ones(10))})
 
         with pytest.raises(ValueError, match="no chunked variables"):
             ds.expr
@@ -975,12 +980,12 @@ class TestDataArrayExpr:
         import xarray as xr
 
         data = da.ones((10, 10), chunks=5)
-        arr = xr.DataArray(data, dims=['x', 'y'], name='test')
+        arr = xr.DataArray(data, dims=["x", "y"], name="test")
 
         result = dask.compute(arr.expr)[0]
 
         assert isinstance(result, xr.DataArray)
-        assert result.name == 'test'
+        assert result.name == "test"
         np.testing.assert_array_equal(result.values, np.ones((10, 10)))
 
 
@@ -1001,10 +1006,12 @@ class TestSharedSubexpressions:
         base_computed = base.map_blocks(expensive_op, dtype=base.dtype)
 
         # Two variables that share the same base computation
-        ds = xr.Dataset({
-            'a': (['x', 'y'], base_computed + 1),
-            'b': (['x', 'y'], base_computed + 2),
-        })
+        ds = xr.Dataset(
+            {
+                "a": (["x", "y"], base_computed + 1),
+                "b": (["x", "y"], base_computed + 2),
+            }
+        )
 
         # Reset counter
         call_count[0] = 0
@@ -1014,14 +1021,14 @@ class TestSharedSubexpressions:
 
         # base_computed has 4 chunks (2x2), so expensive_op should run 4 times
         # NOT 8 times (which would happen if 'a' and 'b' each triggered it)
-        assert call_count[0] == 4, (
-            f"Expected 4 calls, got {call_count[0]} - shared expr was duplicated!"
-        )
+        assert (
+            call_count[0] == 4
+        ), f"Expected 4 calls, got {call_count[0]} - shared expr was duplicated!"
 
         # Verify results are correct
         expected = np.ones((10, 10)) * 2  # base after expensive_op
-        np.testing.assert_array_equal(result['a'].values, expected + 1)
-        np.testing.assert_array_equal(result['b'].values, expected + 2)
+        np.testing.assert_array_equal(result["a"].values, expected + 1)
+        np.testing.assert_array_equal(result["b"].values, expected + 2)
 
     def test_joint_optimization_with_dask_array(self):
         """Verify optimization when computing Dataset alongside raw dask arrays."""
@@ -1037,7 +1044,7 @@ class TestSharedSubexpressions:
         base = da.ones((10, 10), chunks=5).map_blocks(tracked, dtype=float)
 
         # xarray dataset using base
-        ds = xr.Dataset({'a': (['x', 'y'], base + 1)})
+        ds = xr.Dataset({"a": (["x", "y"], base + 1)})
 
         # Standalone dask array using same base
         arr = base.mean()
@@ -1059,7 +1066,7 @@ class TestExpressionOptimizations:
 
         # Create dataset with chunked array
         data = da.ones((100, 100), chunks=10)
-        ds = xr.Dataset({'var': (['x', 'y'], data)})
+        ds = xr.Dataset({"var": (["x", "y"], data)})
 
         # Transform through xarray
         ds = ds + 1
@@ -1069,7 +1076,7 @@ class TestExpressionOptimizations:
         ds = ds.isel(x=slice(5, 15))  # 100 -> 10 in first dim
 
         # Get expression for the variable
-        expr = ds['var'].variable._data.expr
+        expr = ds["var"].variable._data.expr
 
         def has_slice_expr(e, seen=None):
             """Check if tree contains a Slice expression."""
@@ -1079,7 +1086,7 @@ class TestExpressionOptimizations:
                 return False
             seen.add(e._name)
 
-            if type(e).__name__ == 'Slice':
+            if type(e).__name__ == "Slice":
                 return True
             return any(has_slice_expr(dep, seen) for dep in e.dependencies())
 
@@ -1094,7 +1101,7 @@ class TestExpressionOptimizations:
             deps = e.dependencies()
             if not deps:
                 # Leaf node - return its shape if it has one
-                if hasattr(e, 'shape'):
+                if hasattr(e, "shape"):
                     return [e.shape]
                 return []
 
@@ -1108,23 +1115,23 @@ class TestExpressionOptimizations:
 
         # Before optimization: leaf should have original shape
         leaf_shapes_before = get_leaf_shapes(expr)
-        assert any(s == (100, 100) for s in leaf_shapes_before), (
-            f"Expected (100, 100) leaf shape before optimization, got {leaf_shapes_before}"
-        )
+        assert any(
+            s == (100, 100) for s in leaf_shapes_before
+        ), f"Expected (100, 100) leaf shape before optimization, got {leaf_shapes_before}"
 
         # After optimization
         optimized = expr.optimize()
 
         # Slice should be gone (fused into creation)
-        assert not has_slice_expr(optimized), (
-            "Slice still present after optimization - not fused into creation"
-        )
+        assert not has_slice_expr(
+            optimized
+        ), "Slice still present after optimization - not fused into creation"
 
         # Leaf should have sliced shape
         leaf_shapes_after = get_leaf_shapes(optimized)
-        assert any(s == (10, 100) for s in leaf_shapes_after), (
-            f"Expected (10, 100) leaf shape after optimization, got {leaf_shapes_after}"
-        )
+        assert any(
+            s == (10, 100) for s in leaf_shapes_after
+        ), f"Expected (10, 100) leaf shape after optimization, got {leaf_shapes_after}"
 
     def test_slice_pushdown_reduces_io(self):
         """Verify slice pushdown happens automatically and reduces I/O."""
@@ -1134,7 +1141,9 @@ class TestExpressionOptimizations:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/test.zarr"
-            z = zarr.open(path, mode='w', shape=(1000, 1000), chunks=(100, 100), dtype='f8')
+            z = zarr.open(
+                path, mode="w", shape=(1000, 1000), chunks=(100, 100), dtype="f8"
+            )
             z[:] = np.random.random((1000, 1000))
 
             read_slices = []
@@ -1162,14 +1171,12 @@ class TestExpressionOptimizations:
                 result = dask.compute(ds.expr)[0]
 
                 # Should only read first chunk, not all 100
-                assert len(read_slices) <= 1, (
-                    f"Expected 1 chunk read (slice pushdown), got {len(read_slices)}"
-                )
+                assert (
+                    len(read_slices) <= 1
+                ), f"Expected 1 chunk read (slice pushdown), got {len(read_slices)}"
 
                 expected = (z[0:50, 0:50] + 1) * 2
-                np.testing.assert_array_almost_equal(
-                    result['data'].values, expected
-                )
+                np.testing.assert_array_almost_equal(result["data"].values, expected)
 
             finally:
                 z.__class__.__getitem__ = original_getitem

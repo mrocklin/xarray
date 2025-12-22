@@ -1102,6 +1102,52 @@ class DataArray(
 
         return normalize_token((type(self), self._variable, self._coords, self._name))
 
+    @property
+    def expr(self):
+        """Return expression for joint optimization with dask collections.
+
+        See Dataset.expr for full documentation.
+        """
+        from xarray.core.dask_expr import HAS_EXPR_SUPPORT, DataArrayExpr
+
+        if not HAS_EXPR_SUPPORT:
+            raise ImportError(
+                "Dask expression support requires dask with array expressions."
+            )
+
+        if not hasattr(self.variable._data, "expr"):
+            if (
+                hasattr(self.variable._data, "__dask_graph__")
+                and self.variable._data.__dask_graph__()
+            ):
+                raise ValueError("DataArray has dask data without expression support.")
+            raise ValueError(
+                "DataArray is not chunked. Use .expr only with dask-backed DataArrays."
+            )
+
+        # Collect chunked coordinates
+        coord_names = []
+        coord_exprs = []
+        non_chunked_coords = {}
+
+        for name, coord in self.coords.items():
+            if hasattr(coord.variable._data, "expr"):
+                coord_names.append(name)
+                coord_exprs.append(coord.variable._data.expr)
+            else:
+                dims = coord.dims
+                non_chunked_coords[name] = (dims, coord.values)
+
+        return DataArrayExpr(
+            name=self.name,
+            data_expr=self.variable._data.expr,
+            coord_names=tuple(coord_names),
+            coord_exprs=tuple(coord_exprs),
+            non_chunked_coords=non_chunked_coords,
+            dims=self.dims,
+            attrs=dict(self.attrs) if self.attrs else None,
+        )
+
     def __dask_graph__(self):
         return self._to_temp_dataset().__dask_graph__()
 

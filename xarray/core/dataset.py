@@ -631,6 +631,111 @@ class Dataset(
             (type(self), self._variables, self._coord_names, self._attrs or None)
         )
 
+    @property
+    def expr(self):
+        """Return expression for joint optimization with dask collections.
+
+        This property returns a DatasetExpr that contains references to
+        all chunked variable and coordinate expressions. When computed
+        with other dask collections via `dask.compute()`, all expressions
+        are optimized together, enabling detection of shared subexpressions
+        and joint optimization.
+
+        Returns
+        -------
+        DatasetExpr
+            Expression representing this Dataset's computation.
+
+        Raises
+        ------
+        ImportError
+            If dask expression support is not available.
+        ValueError
+            If this Dataset has no chunked (dask-backed) variables.
+
+        Examples
+        --------
+        >>> import dask
+        >>> import dask.array as da
+        >>> import xarray as xr
+        >>>
+        >>> # Create dataset with shared computation
+        >>> base = da.random.random((1000, 1000), chunks=100)
+        >>> ds = xr.Dataset(
+        ...     {
+        ...         "a": (["x", "y"], base * 2),
+        ...         "b": (["x", "y"], base + 1),
+        ...     }
+        ... )
+        >>>
+        >>> # Compute with another dask array - all optimized together
+        >>> result_ds, result_arr = dask.compute(ds.expr, base.mean())
+        """
+        from xarray.core.dask_expr import HAS_EXPR_SUPPORT, DatasetExpr
+
+        if not HAS_EXPR_SUPPORT:
+            raise ImportError(
+                "Dask expression support requires dask with array expressions. "
+            )
+
+        # Collect chunked variables
+        var_names = []
+        var_exprs = []
+        non_chunked_vars = {}
+
+        # Collect chunked coordinates
+        coord_names = []
+        coord_exprs = []
+        non_chunked_coords = {}
+
+        # Track dimension info
+        var_dims = {}
+
+        for name, var in self._variables.items():
+            is_coord = name in self._coord_names
+            dims = var.dims
+            var_dims[name] = dims
+
+            # Check if variable is chunked (has .expr attribute)
+            if hasattr(var._data, "expr"):
+                # Dask array with expression support
+                expr = var._data.expr
+                if is_coord:
+                    coord_names.append(name)
+                    coord_exprs.append(expr)
+                else:
+                    var_names.append(name)
+                    var_exprs.append(expr)
+            elif hasattr(var._data, "__dask_graph__") and var._data.__dask_graph__():
+                # Dask array without expression (shouldn't happen with modern dask)
+                raise ValueError(
+                    f"Variable '{name}' has dask array without expression support. "
+                    "This may indicate an older dask version."
+                )
+            # Non-chunked variable (numpy array, scalar, etc.)
+            elif is_coord:
+                non_chunked_coords[name] = (dims, var.values)
+            else:
+                non_chunked_vars[name] = (dims, var.values)
+
+        if not var_exprs and not coord_exprs:
+            raise ValueError(
+                "Dataset has no chunked variables. "
+                "Use .expr only with dask-backed Datasets."
+            )
+
+        return DatasetExpr(
+            var_names=tuple(var_names),
+            var_exprs=tuple(var_exprs),
+            coord_names=tuple(coord_names),
+            coord_exprs=tuple(coord_exprs),
+            non_chunked_vars=non_chunked_vars,
+            non_chunked_coords=non_chunked_coords,
+            dims=dict(self.sizes),
+            var_dims=var_dims,
+            attrs=dict(self.attrs) if self.attrs else None,
+        )
+
     def __dask_graph__(self):
         graphs = {k: v.__dask_graph__() for k, v in self.variables.items()}
         graphs = {k: v for k, v in graphs.items() if v is not None}
