@@ -69,7 +69,8 @@ class DaskManager(ChunkManagerEntrypoint["DaskArray"]):
 
         if isinstance(data, ImplicitToExplicitIndexingAdapter):
             # lazily loaded backend array classes should use NumPy array operations.
-            kwargs["meta"] = np.ndarray
+            # Create a proper n-dimensional empty array as meta
+            kwargs["meta"] = np.empty((0,) * data.ndim, dtype=data.dtype)
 
         return da.from_array(
             data,
