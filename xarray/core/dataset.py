@@ -648,7 +648,7 @@ class Dataset(
 
         Raises
         ------
-        ImportError
+        AttributeError
             If dask expression support is not available.
         ValueError
             If this Dataset has no chunked (dask-backed) variables.
@@ -674,8 +674,8 @@ class Dataset(
         from xarray.core.dask_expr import HAS_EXPR_SUPPORT, DatasetExpr
 
         if not HAS_EXPR_SUPPORT:
-            raise ImportError(
-                "Dask expression support requires dask with array expressions. "
+            raise AttributeError(
+                "Dask expression support requires dask with array expressions."
             )
 
         # Collect chunked variables

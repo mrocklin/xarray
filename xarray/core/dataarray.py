@@ -1111,7 +1111,7 @@ class DataArray(
         from xarray.core.dask_expr import HAS_EXPR_SUPPORT, DataArrayExpr
 
         if not HAS_EXPR_SUPPORT:
-            raise ImportError(
+            raise AttributeError(
                 "Dask expression support requires dask with array expressions."
             )
 

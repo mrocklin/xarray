@@ -41,6 +41,7 @@ if HAS_EXPR_SUPPORT:
         REDUCER_COLOR,
         SOURCE_COLOR,
         ExprTable,
+        compute_row_emphasis,
         format_bytes,
         get_op_style,
         walk_expr_with_prefix,
@@ -48,29 +49,24 @@ if HAS_EXPR_SUPPORT:
     from dask._task_spec import DataNode, Task, TaskRef
     from dask._task_spec import List as TaskList
 
-    def _simplify_expr(expr):
-        """Simplify an expression without lowering."""
-        if not isinstance(expr, Expr):
-            return expr, False
-        simplified = expr.simplify()
-        changed = simplified._name != expr._name
-        return simplified, changed
+    def _simplify_expr(expr, lower: bool = False):
+        """Simplify an expression, optionally lowering to executable form.
 
-    def _simplify_and_lower(expr):
-        """Simplify and lower an expression to executable form.
-
-        Array expressions need both simplification (FinalizeComputeArray -> Rechunk)
-        and lowering (Rechunk -> executable tasks) to work properly.
+        Parameters
+        ----------
+        expr : Expr
+            The expression to simplify
+        lower : bool
+            If True, also lower the expression (needed for Finalize expressions
+            where array exprs need Rechunk -> executable tasks)
         """
         if not isinstance(expr, Expr):
             return expr, False
-        simplified = expr.simplify()
-        if hasattr(simplified, "lower_completely"):
-            lowered = simplified.lower_completely()
-        else:
-            lowered = simplified
-        changed = lowered._name != expr._name
-        return lowered, changed
+        result = expr.simplify()
+        if lower and hasattr(result, "lower_completely"):
+            result = result.lower_completely()
+        changed = result._name != expr._name
+        return result, changed
 
     def _collect_expr_dependencies(*expr_sources):
         """Collect Expr objects from multiple sources (single exprs or tuples)."""
@@ -223,8 +219,6 @@ if HAS_EXPR_SUPPORT:
 
     def _build_array_table(expr, dims: tuple, title: str | None = None):
         """Build a rich Table for a single array expression."""
-        import math
-
         from rich.table import Table
         from rich.text import Text
 
@@ -240,20 +234,21 @@ if HAS_EXPR_SUPPORT:
 
         table.add_column("Operation", no_wrap=True)
         table.add_column("Dims", no_wrap=True)
-        table.add_column("Bytes", justify="right", style="dim", no_wrap=True)
-        table.add_column("Chunks", justify="right", style="dim", no_wrap=True)
+        table.add_column("Bytes", justify="right", no_wrap=True)
+        table.add_column("Chunks", justify="right", no_wrap=True)
 
         # Walk the expression tree using shared utility
         nodes = list(
             walk_expr_with_prefix(expr, is_expr_child=lambda op: hasattr(op, "chunks"))
         )
 
-        # Calculate max bytes for highlighting
+        # Compute row emphasis based on relative bytes (dim small rows)
         node_bytes = [_get_expr_nbytes(n) for n, _ in nodes]
-        valid_bytes = [b for b in node_bytes if not math.isnan(b)]
-        max_bytes = max(valid_bytes) if valid_bytes else 0
+        row_emphasis = compute_row_emphasis(node_bytes)
 
-        for (node, prefix), nbytes in zip(nodes, node_bytes, strict=True):
+        for (node, prefix), nbytes, emphasize in zip(
+            nodes, node_bytes, row_emphasis, strict=True
+        ):
             op_name = _get_op_name(node)
             color = _get_op_color(node)
 
@@ -270,21 +265,14 @@ if HAS_EXPR_SUPPORT:
 
             chunks = node.chunks if hasattr(node, "chunks") else ()
 
-            # Row style for memory highlighting
-            row_style = None
-            if max_bytes > 0 and not math.isnan(nbytes):
-                ratio = nbytes / max_bytes
-                if ratio > 0.1:
-                    # Subtle yellow tint for large arrays
-                    yellow = int(255 - ratio * 35)
-                    row_style = f"on rgb(255,255,{yellow})"
+            # Dim data columns for small arrays (operation column stays bright)
+            data_style = None if emphasize else "dim"
 
             table.add_row(
                 op_text,
-                dim_str,
-                format_bytes(nbytes),
-                _format_chunks_summary(chunks),
-                style=row_style,
+                Text(dim_str, style=data_style),
+                Text(format_bytes(nbytes), style=data_style),
+                Text(_format_chunks_summary(chunks), style=data_style),
             )
 
         return table
@@ -455,21 +443,17 @@ if HAS_EXPR_SUPPORT:
             return _collect_expr_dependencies(self.var_exprs, self.coord_exprs)
 
         def _simplify_down(self):
-            """Simplify and lower nested expressions.
-
-            The optimizer only recurses into direct Expr operands, but we store
-            expressions in tuples. This method explicitly simplifies them.
-            """
+            """Simplify and lower nested expressions."""
             new_var_exprs = []
             any_changed = False
             for expr in self.var_exprs:
-                new_expr, changed = _simplify_and_lower(expr)
+                new_expr, changed = _simplify_expr(expr, lower=True)
                 any_changed = any_changed or changed
                 new_var_exprs.append(new_expr)
 
             new_coord_exprs = []
             for expr in self.coord_exprs:
-                new_expr, changed = _simplify_and_lower(expr)
+                new_expr, changed = _simplify_expr(expr, lower=True)
                 any_changed = any_changed or changed
                 new_coord_exprs.append(new_expr)
 
@@ -671,11 +655,11 @@ if HAS_EXPR_SUPPORT:
 
         def _simplify_down(self):
             """Simplify and lower nested expressions."""
-            new_data_expr, any_changed = _simplify_and_lower(self.data_expr)
+            new_data_expr, any_changed = _simplify_expr(self.data_expr, lower=True)
 
             new_coord_exprs = []
             for expr in self.coord_exprs:
-                new_expr, changed = _simplify_and_lower(expr)
+                new_expr, changed = _simplify_expr(expr, lower=True)
                 any_changed = any_changed or changed
                 new_coord_exprs.append(new_expr)
 
