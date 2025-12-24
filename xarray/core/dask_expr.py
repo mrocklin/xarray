@@ -80,6 +80,40 @@ if HAS_EXPR_SUPPORT:
                 deps.extend(expr for expr in source if isinstance(expr, Expr))
         return deps
 
+    def _fuse_exprs(exprs: list) -> list:
+        """Fuse expressions jointly via _ExprSequence to preserve sharing.
+
+        Parameters
+        ----------
+        exprs : list
+            List of expressions (some may not have .fuse())
+
+        Returns
+        -------
+        list
+            Fused expressions in same order, non-fusable unchanged
+        """
+        from dask._expr import _ExprSequence
+
+        fusable = [e for e in exprs if hasattr(e, "fuse")]
+        if not fusable:
+            return exprs
+
+        # Fuse jointly
+        if len(fusable) == 1:
+            fused = [fusable[0].fuse()]
+        else:
+            seq = _ExprSequence(*fusable)
+            fused_seq = fusable[0].fuse.__func__(seq)
+            if isinstance(fused_seq, _ExprSequence):
+                fused = list(fused_seq.operands)
+            else:
+                fused = [e.fuse() for e in fusable]
+
+        # Map back to original order
+        fused_iter = iter(fused)
+        return [next(fused_iter) if hasattr(e, "fuse") else e for e in exprs]
+
     # --- Visualization helpers ---
 
     def _format_shape(shape: tuple) -> str:
@@ -191,8 +225,13 @@ if HAS_EXPR_SUPPORT:
         - 'Trim 9Fd11138...' -> 'Trim'
         - 'open_dataset-air-311f2fb2' -> 'Open Dataset'
         - 'mean-aggregate-def456' -> 'Mean'
+        - FusedBlockwise -> 'Fused'
         """
         from dask.base import key_split
+
+        # Check for FusedBlockwise type
+        if type(node).__name__ == "FusedBlockwise":
+            return "Fused"
 
         if not hasattr(node, "_name"):
             return type(node).__name__
@@ -391,6 +430,24 @@ if HAS_EXPR_SUPPORT:
                 attrs=self.attrs,
             )
 
+        def fuse(self):
+            """Fuse nested array expressions jointly to preserve sharing."""
+            n_vars = len(self.var_exprs)
+            all_exprs = list(self.var_exprs) + list(self.coord_exprs)
+            fused = _fuse_exprs(all_exprs)
+
+            return DatasetExpr(
+                var_names=self.var_names,
+                var_exprs=tuple(fused[:n_vars]),
+                coord_names=self.coord_names,
+                coord_exprs=tuple(fused[n_vars:]),
+                non_chunked_vars=self.non_chunked_vars,
+                non_chunked_coords=self.non_chunked_coords,
+                dims=self.dims,
+                var_dims=self.var_dims,
+                attrs=self.attrs,
+            )
+
         def _table(self):
             """Build rich tables for all variables."""
             tables = []
@@ -461,6 +518,24 @@ if HAS_EXPR_SUPPORT:
                     attrs=self.attrs,
                 )
             return None
+
+        def fuse(self):
+            """Fuse nested array expressions jointly to preserve sharing."""
+            n_vars = len(self.var_exprs)
+            all_exprs = list(self.var_exprs) + list(self.coord_exprs)
+            fused = _fuse_exprs(all_exprs)
+
+            return DatasetExprFinalize(
+                var_names=self.var_names,
+                var_exprs=tuple(fused[:n_vars]),
+                coord_names=self.coord_names,
+                coord_exprs=tuple(fused[n_vars:]),
+                non_chunked_vars=self.non_chunked_vars,
+                non_chunked_coords=self.non_chunked_coords,
+                dims=self.dims,
+                var_dims=self.var_dims,
+                attrs=self.attrs,
+            )
 
         def _layer(self) -> dict:
             """Build layer with reconstruction task."""
@@ -615,6 +690,21 @@ if HAS_EXPR_SUPPORT:
                 attrs=self.attrs,
             )
 
+        def fuse(self):
+            """Fuse nested array expressions jointly to preserve sharing."""
+            all_exprs = [self.data_expr] + list(self.coord_exprs)
+            fused = _fuse_exprs(all_exprs)
+
+            return DataArrayExpr(
+                name=self.name,
+                data_expr=fused[0],
+                coord_names=self.coord_names,
+                coord_exprs=tuple(fused[1:]),
+                non_chunked_coords=self.non_chunked_coords,
+                dims=self.dims,
+                attrs=self.attrs,
+            )
+
         def _table(self):
             """Build rich table for the data array."""
             return ExprTable(_build_array_table(self.data_expr, self.dims))
@@ -665,6 +755,21 @@ if HAS_EXPR_SUPPORT:
                     attrs=self.attrs,
                 )
             return None
+
+        def fuse(self):
+            """Fuse nested array expressions jointly to preserve sharing."""
+            all_exprs = [self.data_expr] + list(self.coord_exprs)
+            fused = _fuse_exprs(all_exprs)
+
+            return DataArrayExprFinalize(
+                name=self.name,
+                data_expr=fused[0],
+                coord_names=self.coord_names,
+                coord_exprs=tuple(fused[1:]),
+                non_chunked_coords=self.non_chunked_coords,
+                dims=self.dims,
+                attrs=self.attrs,
+            )
 
         def _layer(self) -> dict:
             from dask.base import flatten

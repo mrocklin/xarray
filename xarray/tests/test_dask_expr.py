@@ -235,3 +235,137 @@ class TestSharedSubexpressions:
 
         # base has 4 chunks, should only compute once total
         assert call_count[0] == 4, f"Expected 4, got {call_count[0]}"
+
+
+class TestExpressionFusion:
+    """Tests for blockwise fusion in xarray expressions."""
+
+    def test_dataset_fusion_reduces_depth_and_tasks(self):
+        """Verify that fusion reduces expression depth and task count."""
+        # Create dataset and apply chain of fusable xarray operations
+        data = da.ones((10, 10), chunks=5)
+        ds = xr.Dataset({"a": (["x", "y"], data)})
+        ds = ds + 1 + 2 + 3 + 4 + 5  # 5 additions on the Dataset
+
+        expr = ds.expr
+        fused = expr.fuse()
+
+        # Fusion should reduce depth
+        assert fused._depth() < expr._depth()
+
+        # Fusion should reduce task count
+        tasks_before = len(expr.__dask_graph__())
+        tasks_after = len(fused.__dask_graph__())
+        assert tasks_after < tasks_before, (
+            f"Fusion did not reduce tasks: {tasks_before} -> {tasks_after}"
+        )
+
+        # Verify the result is still correct
+        expected = xr.Dataset({"a": (["x", "y"], np.ones((10, 10)) + 15)})
+        xr.testing.assert_equal(ds, expected)
+
+    def test_dataarray_fusion_reduces_depth_and_tasks(self):
+        """Verify that fusion reduces expression depth and task count for DataArray."""
+        data = da.ones((10, 10), chunks=5)
+        arr = xr.DataArray(data, dims=["x", "y"], name="test")
+        arr = arr * 2 * 3 * 4 * 5  # 4 multiplications on the DataArray
+
+        expr = arr.expr
+        fused = expr.fuse()
+
+        assert fused._depth() < expr._depth()
+        assert len(fused.__dask_graph__()) < len(expr.__dask_graph__())
+
+        # Verify correctness
+        expected = xr.DataArray(np.ones((10, 10)) * 120, dims=["x", "y"], name="test")
+        xr.testing.assert_equal(arr, expected)
+
+    def test_optimize_with_fuse_flag(self):
+        """Verify optimize(fuse=True) triggers fusion."""
+        data = da.ones((10, 10), chunks=5)
+        ds = xr.Dataset({"a": (["x", "y"], data)})
+        ds = ds + 1 + 2 + 3  # Operations on the Dataset
+
+        expr = ds.expr
+        optimized = expr.optimize(fuse=True)
+
+        # After optimize(fuse=True), inner expressions should be FusedBlockwise
+        inner_type = type(optimized.var_exprs[0]).__name__
+        assert inner_type == "FusedBlockwise", (
+            f"Expected FusedBlockwise, got {inner_type}"
+        )
+
+    def test_joint_fusion_preserves_shared_base_in_graph(self):
+        """Verify joint fusion keeps shared base as separate tasks in graph.
+
+        With joint fusion via _ExprSequence, a shared base computation should
+        appear as separate tasks in the graph (not embedded into each variable's
+        fused block). This is important for expensive operations like I/O.
+        """
+        data = da.ones((4, 4), chunks=2)
+        base = data + 1  # shared base
+        ds = xr.Dataset(
+            {
+                "a": (["x", "y"], base + 10),
+                "b": (["x", "y"], base + 20),
+            }
+        )
+
+        fused = ds.expr.fuse()
+        graph = fused.__dask_graph__()
+
+        # Get unique key names (without chunk indices)
+        key_names = set(k[0] if isinstance(k, tuple) else k for k in graph.keys())
+
+        # Joint fusion should produce 3 unique key names:
+        # - shared base (data + 1)
+        # - variable a (+10)
+        # - variable b (+20)
+        # Independent fusion would only have 2 (base embedded in each)
+        assert len(key_names) == 3, (
+            f"Expected 3 unique key names (shared base + 2 vars), got {len(key_names)}"
+        )
+
+    def test_fusion_preserves_shared_computation_at_runtime(self):
+        """Verify shared computation is only executed once per chunk."""
+        call_count = [0]
+
+        def tracked_op(x):
+            call_count[0] += 1
+            return x + 1 + 2
+
+        # Create shared base that branches to two variables
+        data = da.ones((10, 10), chunks=5)  # 4 chunks
+        base = data.map_blocks(tracked_op, dtype=float)
+
+        ds = xr.Dataset(
+            {
+                "a": (["x", "y"], base + 10),
+                "b": (["x", "y"], base + 20),
+            }
+        )
+
+        # Verify fusion still reduces tasks
+        expr = ds.expr
+        fused = expr.fuse()
+        assert len(fused.__dask_graph__()) < len(expr.__dask_graph__())
+
+        # Compute and verify shared base is computed only once per chunk
+        call_count[0] = 0
+        result = ds.compute()
+
+        # base has 4 chunks, should be computed exactly 4 times (not 8)
+        assert call_count[0] == 4, (
+            f"Shared base computed {call_count[0]} times, expected 4"
+        )
+
+        # Verify results are correct
+        expected_base = np.ones((10, 10)) + 1 + 2
+        xr.testing.assert_equal(
+            result["a"],
+            xr.DataArray(expected_base + 10, dims=["x", "y"]),
+        )
+        xr.testing.assert_equal(
+            result["b"],
+            xr.DataArray(expected_base + 20, dims=["x", "y"]),
+        )

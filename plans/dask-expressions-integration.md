@@ -13,6 +13,7 @@ This plan describes how to integrate xarray with Dask's new expression-based com
 - Tuple operands (like `var_exprs`) require custom `_simplify_down()` since optimizer only recurses into direct Expr operands
 - Feature detection must check that `dask.array.Array` actually has `.expr` (not just that classes exist)
 - Requires `DASK_ARRAY__QUERY_PLANNING=true` config to enable array expressions in dask
+- Must override `.fuse()` on xarray expression classes to propagate fusion to nested array expressions (base `Expr.fuse()` is a no-op)
 
 **Related resources in dask repository (`../dask3/`):**
 
