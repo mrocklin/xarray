@@ -19,12 +19,14 @@ def _has_expr_support() -> bool:
     This checks not just for the presence of expression classes, but that
     dask arrays actually expose the .expr property (which indicates the
     expression system is active, not just present in the codebase).
+    Also requires the _rich_table module for visualization.
     """
     try:
         # Check that dask arrays actually have .expr attribute
         # (the expression system may be present but not active)
         import dask.array as da
         from dask._expr import Expr  # noqa: F401
+        from dask._rich_table import walk_expr_with_prefix  # noqa: F401
 
         test_arr = da.ones((2, 2), chunks=1)
         return hasattr(test_arr, "expr")
@@ -80,18 +82,11 @@ if HAS_EXPR_SUPPORT:
 
     # --- Visualization helpers ---
 
-    def _format_dims(dims: tuple, shape: tuple) -> str:
-        """Format dimensions with sizes, e.g. 'time: 100, lat: 50'."""
-        if not dims:
+    def _format_shape(shape: tuple) -> str:
+        """Format shape compactly, e.g. '(4384, 121, 281)'."""
+        if not shape:
             return "()"
-        return ", ".join(f"{d}: {s}" for d, s in zip(dims, shape, strict=False))
-
-    def _format_chunks_summary(chunks: tuple) -> str:
-        """Summarize chunks compactly, e.g. '100×50'."""
-        if not chunks:
-            return ""
-        sizes = [c[0] if c else 0 for c in chunks]
-        return "×".join(str(s) for s in sizes)
+        return "×".join(str(s) for s in shape)
 
     def _get_expr_nbytes(expr) -> float:
         """Get nbytes for an array expression."""
@@ -185,37 +180,38 @@ if HAS_EXPR_SUPPORT:
 
     def _is_hex_hash(s: str) -> bool:
         """Check if string looks like a hex hash (8+ hex chars)."""
-        return len(s) >= 8 and all(c in "0123456789abcdef" for c in s.lower())
+        return len(s) >= 8 and all(c in "0123456789abcdefABCDEF" for c in s)
 
     def _get_op_name(node) -> str:
         """Get a clean operation name from the expression.
 
-        Extracts the operation type from names like:
-        - 'open_dataset-air-311f2fb2...' -> 'Open Dataset'
-        - 'random_sample-abc123...' -> 'Random Sample'
-        - 'mean-aggregate-def456...' -> 'Mean'
+        Uses dask's key_split to strip hashes, then extracts the operation type.
+        Examples:
+        - '_trim-9fd11138...' -> 'Trim'
+        - 'Trim 9Fd11138...' -> 'Trim'
+        - 'open_dataset-air-311f2fb2' -> 'Open Dataset'
+        - 'mean-aggregate-def456' -> 'Mean'
         """
-        if hasattr(node, "_name") and "-" in node._name:
-            parts = node._name.split("-")
-            # Take parts until we hit a hash
-            meaningful = []
-            for part in parts:
-                if _is_hex_hash(part):
-                    break
-                meaningful.append(part)
+        from dask.base import key_split
 
-            if meaningful:
-                # Take just the first part (operation type)
-                # Skip suffixes like 'aggregate', 'partial', 'chunk'
-                name = meaningful[0]
-                for skip in ["aggregate", "partial", "chunk", "agg"]:
-                    if name == skip and len(meaningful) > 1:
-                        name = meaningful[1]
-                        break
-                return name.replace("_", " ").title()
+        if not hasattr(node, "_name"):
+            return type(node).__name__
 
-        # Fall back to class name
-        return type(node).__name__
+        name = node._name
+
+        # Handle space-separated hashes first (e.g., "Trim 9Fd11138...")
+        if " " in name:
+            parts = [p for p in name.split(" ") if p and not _is_hex_hash(p)]
+            name = "-".join(parts) if parts else name
+
+        # Use dask's key_split to strip trailing hashes
+        name = key_split(name)
+
+        # Take first part to avoid dask internals like -aggregate, -partial
+        if "-" in name:
+            name = name.split("-")[0]
+
+        return name.replace("_", " ").title()
 
     def _build_array_table(expr, dims: tuple, title: str | None = None):
         """Build a rich Table for a single array expression."""
@@ -228,19 +224,20 @@ if HAS_EXPR_SUPPORT:
             show_header=True,
             header_style="dim",
             box=None,
-            padding=(0, 2),
+            padding=(0, 1),
             collapse_padding=True,
         )
 
         table.add_column("Operation", no_wrap=True)
-        table.add_column("Dims", no_wrap=True)
+        table.add_column("Shape", no_wrap=True)
         table.add_column("Bytes", justify="right", no_wrap=True)
-        table.add_column("Chunks", justify="right", no_wrap=True)
 
         # Walk the expression tree using shared utility
-        nodes = list(
-            walk_expr_with_prefix(expr, is_expr_child=lambda op: hasattr(op, "chunks"))
-        )
+        # Filter to nodes that have both operands (for walking) and chunks (for display)
+        def is_array_expr(op):
+            return hasattr(op, "chunks") and hasattr(op, "operands")
+
+        nodes = list(walk_expr_with_prefix(expr, is_expr_child=is_array_expr))
 
         # Compute row emphasis based on relative bytes (dim small rows)
         node_bytes = [_get_expr_nbytes(n) for n, _ in nodes]
@@ -256,23 +253,17 @@ if HAS_EXPR_SUPPORT:
             op_text.append(prefix, style="dim")
             op_text.append(op_name, style=get_op_style(color))
 
-            # Format dimensions
-            if hasattr(node, "shape"):
-                node_dims = dims[: len(node.shape)] if dims else ()
-                dim_str = _format_dims(node_dims, node.shape)
-            else:
-                dim_str = ""
-
-            chunks = node.chunks if hasattr(node, "chunks") else ()
+            # Format shape
+            shape = node.shape if hasattr(node, "shape") else ()
+            shape_str = _format_shape(shape)
 
             # Dim data columns for small arrays (operation column stays bright)
             data_style = None if emphasize else "dim"
 
             table.add_row(
                 op_text,
-                Text(dim_str, style=data_style),
+                Text(shape_str, style=data_style),
                 Text(format_bytes(nbytes), style=data_style),
-                Text(_format_chunks_summary(chunks), style=data_style),
             )
 
         return table
