@@ -70,6 +70,32 @@ if HAS_EXPR_SUPPORT:
         changed = result._name != expr._name
         return result, changed
 
+    def _lower_expr(expr, lowered=None):
+        """Lower an expression one step.
+
+        Returns (lowered_expr, changed) tuple.
+        """
+        if not isinstance(expr, Expr):
+            return expr, False
+        if lowered is None:
+            lowered = {}
+        result = expr.lower_once(lowered)
+        changed = result._name != expr._name
+        return result, changed
+
+    def _transform_exprs(exprs, transform_fn):
+        """Apply a transform function to a sequence of expressions.
+
+        Returns (new_exprs, any_changed) tuple.
+        """
+        new_exprs = []
+        any_changed = False
+        for expr in exprs:
+            new_expr, changed = transform_fn(expr)
+            any_changed = any_changed or changed
+            new_exprs.append(new_expr)
+        return new_exprs, any_changed
+
     def _collect_expr_dependencies(*expr_sources):
         """Collect Expr objects from multiple sources (single exprs or tuples)."""
         deps = []
@@ -369,25 +395,14 @@ if HAS_EXPR_SUPPORT:
             return {}
 
         def _simplify_down(self):
-            """Simplify nested expressions.
-
-            The optimizer only recurses into direct Expr operands, but we store
-            expressions in tuples. This method explicitly simplifies them.
-            """
-            new_var_exprs = []
-            any_changed = False
-            for expr in self.var_exprs:
-                new_expr, changed = _simplify_expr(expr)
-                any_changed = any_changed or changed
-                new_var_exprs.append(new_expr)
-
-            new_coord_exprs = []
-            for expr in self.coord_exprs:
-                new_expr, changed = _simplify_expr(expr)
-                any_changed = any_changed or changed
-                new_coord_exprs.append(new_expr)
-
-            if any_changed:
+            """Simplify nested expressions."""
+            new_var_exprs, var_changed = _transform_exprs(
+                self.var_exprs, _simplify_expr
+            )
+            new_coord_exprs, coord_changed = _transform_exprs(
+                self.coord_exprs, _simplify_expr
+            )
+            if var_changed or coord_changed:
                 return DatasetExpr(
                     var_names=self.var_names,
                     var_exprs=tuple(new_var_exprs),
@@ -448,6 +463,26 @@ if HAS_EXPR_SUPPORT:
                 attrs=self.attrs,
             )
 
+        def _lower(self):
+            """Lower nested array expressions."""
+            new_var_exprs, var_changed = _transform_exprs(self.var_exprs, _lower_expr)
+            new_coord_exprs, coord_changed = _transform_exprs(
+                self.coord_exprs, _lower_expr
+            )
+            if var_changed or coord_changed:
+                return DatasetExpr(
+                    var_names=self.var_names,
+                    var_exprs=tuple(new_var_exprs),
+                    coord_names=self.coord_names,
+                    coord_exprs=tuple(new_coord_exprs),
+                    non_chunked_vars=self.non_chunked_vars,
+                    non_chunked_coords=self.non_chunked_coords,
+                    dims=self.dims,
+                    var_dims=self.var_dims,
+                    attrs=self.attrs,
+                )
+            return None
+
         def _table(self):
             """Build rich tables for all variables."""
             tables = []
@@ -492,20 +527,14 @@ if HAS_EXPR_SUPPORT:
 
         def _simplify_down(self):
             """Simplify and lower nested expressions."""
-            new_var_exprs = []
-            any_changed = False
-            for expr in self.var_exprs:
-                new_expr, changed = _simplify_expr(expr, lower=True)
-                any_changed = any_changed or changed
-                new_var_exprs.append(new_expr)
-
-            new_coord_exprs = []
-            for expr in self.coord_exprs:
-                new_expr, changed = _simplify_expr(expr, lower=True)
-                any_changed = any_changed or changed
-                new_coord_exprs.append(new_expr)
-
-            if any_changed:
+            simplify_and_lower = lambda e: _simplify_expr(e, lower=True)
+            new_var_exprs, var_changed = _transform_exprs(
+                self.var_exprs, simplify_and_lower
+            )
+            new_coord_exprs, coord_changed = _transform_exprs(
+                self.coord_exprs, simplify_and_lower
+            )
+            if var_changed or coord_changed:
                 return DatasetExprFinalize(
                     var_names=self.var_names,
                     var_exprs=tuple(new_var_exprs),
@@ -536,6 +565,26 @@ if HAS_EXPR_SUPPORT:
                 var_dims=self.var_dims,
                 attrs=self.attrs,
             )
+
+        def _lower(self):
+            """Lower nested array expressions."""
+            new_var_exprs, var_changed = _transform_exprs(self.var_exprs, _lower_expr)
+            new_coord_exprs, coord_changed = _transform_exprs(
+                self.coord_exprs, _lower_expr
+            )
+            if var_changed or coord_changed:
+                return DatasetExprFinalize(
+                    var_names=self.var_names,
+                    var_exprs=tuple(new_var_exprs),
+                    coord_names=self.coord_names,
+                    coord_exprs=tuple(new_coord_exprs),
+                    non_chunked_vars=self.non_chunked_vars,
+                    non_chunked_coords=self.non_chunked_coords,
+                    dims=self.dims,
+                    var_dims=self.var_dims,
+                    attrs=self.attrs,
+                )
+            return None
 
         def _layer(self) -> dict:
             """Build layer with reconstruction task."""
@@ -647,15 +696,11 @@ if HAS_EXPR_SUPPORT:
 
         def _simplify_down(self):
             """Simplify nested expressions."""
-            new_data_expr, any_changed = _simplify_expr(self.data_expr)
-
-            new_coord_exprs = []
-            for expr in self.coord_exprs:
-                new_expr, changed = _simplify_expr(expr)
-                any_changed = any_changed or changed
-                new_coord_exprs.append(new_expr)
-
-            if any_changed:
+            new_data_expr, data_changed = _simplify_expr(self.data_expr)
+            new_coord_exprs, coord_changed = _transform_exprs(
+                self.coord_exprs, _simplify_expr
+            )
+            if data_changed or coord_changed:
                 return DataArrayExpr(
                     name=self.name,
                     data_expr=new_data_expr,
@@ -705,6 +750,24 @@ if HAS_EXPR_SUPPORT:
                 attrs=self.attrs,
             )
 
+        def _lower(self):
+            """Lower nested array expressions."""
+            new_data_expr, data_changed = _lower_expr(self.data_expr)
+            new_coord_exprs, coord_changed = _transform_exprs(
+                self.coord_exprs, _lower_expr
+            )
+            if data_changed or coord_changed:
+                return DataArrayExpr(
+                    name=self.name,
+                    data_expr=new_data_expr,
+                    coord_names=self.coord_names,
+                    coord_exprs=tuple(new_coord_exprs),
+                    non_chunked_coords=self.non_chunked_coords,
+                    dims=self.dims,
+                    attrs=self.attrs,
+                )
+            return None
+
         def _table(self):
             """Build rich table for the data array."""
             return ExprTable(_build_array_table(self.data_expr, self.dims))
@@ -736,15 +799,12 @@ if HAS_EXPR_SUPPORT:
 
         def _simplify_down(self):
             """Simplify and lower nested expressions."""
-            new_data_expr, any_changed = _simplify_expr(self.data_expr, lower=True)
-
-            new_coord_exprs = []
-            for expr in self.coord_exprs:
-                new_expr, changed = _simplify_expr(expr, lower=True)
-                any_changed = any_changed or changed
-                new_coord_exprs.append(new_expr)
-
-            if any_changed:
+            simplify_and_lower = lambda e: _simplify_expr(e, lower=True)
+            new_data_expr, data_changed = simplify_and_lower(self.data_expr)
+            new_coord_exprs, coord_changed = _transform_exprs(
+                self.coord_exprs, simplify_and_lower
+            )
+            if data_changed or coord_changed:
                 return DataArrayExprFinalize(
                     name=self.name,
                     data_expr=new_data_expr,
@@ -770,6 +830,24 @@ if HAS_EXPR_SUPPORT:
                 dims=self.dims,
                 attrs=self.attrs,
             )
+
+        def _lower(self):
+            """Lower nested array expressions."""
+            new_data_expr, data_changed = _lower_expr(self.data_expr)
+            new_coord_exprs, coord_changed = _transform_exprs(
+                self.coord_exprs, _lower_expr
+            )
+            if data_changed or coord_changed:
+                return DataArrayExprFinalize(
+                    name=self.name,
+                    data_expr=new_data_expr,
+                    coord_names=self.coord_names,
+                    coord_exprs=tuple(new_coord_exprs),
+                    non_chunked_coords=self.non_chunked_coords,
+                    dims=self.dims,
+                    attrs=self.attrs,
+                )
+            return None
 
         def _layer(self) -> dict:
             from dask.base import flatten

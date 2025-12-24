@@ -369,3 +369,108 @@ class TestExpressionFusion:
             result["b"],
             xr.DataArray(expected_base + 20, dims=["x", "y"]),
         )
+
+    def test_optimization_called_during_compute(self):
+        """Verify that optimize() is called automatically during dask.compute().
+
+        This test verifies that when calling dask.compute(ds), the expression
+        pipeline runs optimize() which includes fusion. We check this by
+        comparing the graph that would be executed to the optimized graph.
+        """
+        from unittest.mock import patch
+
+        # Create dataset with chain of fusable operations
+        data = da.ones((10, 10), chunks=5)
+        ds = xr.Dataset({"a": (["x", "y"], data)})
+        ds = ds + 1 + 2 + 3 + 4 + 5  # 5 additions - should fuse
+
+        expr = ds.expr
+
+        # Get task counts before and after optimization
+        unoptimized_tasks = len(expr.__dask_graph__())
+        optimized_expr = expr.optimize(fuse=True)
+        optimized_tasks = len(optimized_expr.__dask_graph__())
+
+        # Sanity check: optimization should reduce tasks
+        assert optimized_tasks < unoptimized_tasks, (
+            f"Expected optimization to reduce tasks: {unoptimized_tasks} -> {optimized_tasks}"
+        )
+
+        # Patch optimize() to track if it's called
+        from dask._expr import Expr
+
+        optimize_called = [False]
+        original_optimize = Expr.optimize
+
+        def tracking_optimize(self, fuse=False):
+            optimize_called[0] = True
+            return original_optimize(self, fuse=fuse)
+
+        with patch.object(Expr, "optimize", tracking_optimize):
+            (result,) = dask.compute(ds)
+
+        # Verify optimize was called
+        assert optimize_called[0], "optimize() was not called during dask.compute()"
+
+        # Verify result is correct
+        expected = np.ones((10, 10)) + 15
+        np.testing.assert_array_equal(result["a"].values, expected)
+
+    def test_reshape_mean_slice_workflow(self):
+        """Test workflow with reshape, mean, and slice.
+
+        This tests that high-level expressions like Reshape are properly
+        lowered through the optimization pipeline.
+        """
+        from dask._expr import FinalizeCompute
+        from dask.base import collections_to_expr
+
+        # Create data with shape that can be reshaped
+        data = da.ones((100, 20, 20), chunks=(10, 10, 10))
+        ds = xr.Dataset(
+            {"temp": (["time", "lat", "lon"], data)},
+            coords={
+                "time": np.arange(100),
+                "lat": np.arange(20),
+                "lon": np.arange(20),
+            },
+        )
+
+        # Apply operations: mean then slice
+        daily = ds.mean(dim=["time"])
+        subset = daily.isel(lat=slice(5, 10), lon=slice(5, 10))
+
+        # Verify compute works through the full pipeline
+        coll_expr = collections_to_expr([subset])
+        final_expr = FinalizeCompute(coll_expr)
+        optimized = final_expr.optimize()
+
+        # Should be able to build graph without npartitions error
+        graph = optimized.__dask_graph__()
+        assert len(graph) > 0
+
+        # Verify slice is pushed down by checking leaf shapes
+        inner_expr = optimized.operands[0].var_exprs[0]
+
+        def get_leaves(e, seen=None):
+            if seen is None:
+                seen = set()
+            if e._name in seen:
+                return []
+            seen.add(e._name)
+            deps = e.dependencies() if hasattr(e, "dependencies") else []
+            if not deps:
+                return [e.shape if hasattr(e, "shape") else None]
+            leaves = []
+            for d in deps:
+                leaves.extend(get_leaves(d, seen))
+            return leaves
+
+        leaf_shapes = [s for s in get_leaves(inner_expr) if s is not None]
+        # At least one leaf should have the sliced shape (5x5), not full (20x20)
+        has_sliced = any(5 in s for s in leaf_shapes if isinstance(s, tuple))
+        assert has_sliced, f"Slice not pushed down. Leaf shapes: {leaf_shapes}"
+
+        # Verify compute produces correct result
+        result = subset.compute()
+        assert result["temp"].shape == (5, 5)  # lat=5, lon=5

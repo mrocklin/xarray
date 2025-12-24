@@ -10,12 +10,13 @@ This plan describes how to integrate xarray with Dask's new expression-based com
 
 - Dask automatically uses `.expr` via `collections_to_expr()` - users pass the Dataset/DataArray, not the expression
 - Array expressions need `simplify()` + `lower_completely()` to become executable
-- Tuple operands (like `var_exprs`) require custom `_simplify_down()` since optimizer only recurses into direct Expr operands
+- Tuple operands (like `var_exprs`) require custom `_simplify_down()` AND `_lower()` since optimizer only recurses into direct Expr operands
 - Feature detection must check that `dask.array.Array` actually has `.expr` (not just that classes exist)
 - Requires `DASK_ARRAY__QUERY_PLANNING=true` config to enable array expressions in dask
 - Must override `.fuse()` on xarray expression classes to propagate fusion to nested array expressions (base `Expr.fuse()` is a no-op)
+- Must override `_lower()` on xarray expression classes to lower nested array expressions (otherwise high-level expressions like `Reshape` won't be lowered and will fail when building the task graph)
 
-**Related resources in dask repository (`../dask3/`):**
+**Related resources in dask repository (`../dask/` - note: previously referenced as `../dask3/`):**
 
 - Design doc: `designs/array-expr.md` - Core principles of expression system
 - Base classes: `dask/_expr.py` - `Expr`, `_ExprSequence`, `FinalizeCompute`
@@ -854,7 +855,7 @@ class DataArray:
 - Multiple datasets together
 - Shared subexpression deduplication
 
-**To run tests:** `DASK_ARRAY__QUERY_PLANNING=true PYTHONPATH=../dask3 pytest xarray/tests/test_dask_expr.py`
+**To run tests:** `DASK_ARRAY__QUERY_PLANNING=true PYTHONPATH=../dask pytest xarray/tests/test_dask_expr.py`
 
 ### Phase 3: Integration with Existing Dask Protocol
 
@@ -1203,7 +1204,7 @@ class TestExpressionOptimizations:
 
 ## References
 
-### Dask Repository Files (in `../dask3/`)
+### Dask Repository Files (in `../dask/`)
 
 - `dask/_expr.py` - Base `Expr` class, `_ExprSequence`, optimization methods
 - `dask/base.py` - `compute()`, `collections_to_expr()`, `unpack_collections()`
