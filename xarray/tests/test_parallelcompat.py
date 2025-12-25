@@ -110,7 +110,7 @@ class DummyChunkManager(ChunkManagerEntrypoint):
         meta=None,
         **kwargs,
     ):
-        from dask.array.gufunc import apply_gufunc
+        from dask.array import apply_gufunc
 
         return apply_gufunc(
             func,

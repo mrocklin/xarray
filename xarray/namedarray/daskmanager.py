@@ -155,7 +155,7 @@ class DaskManager(ChunkManagerEntrypoint["DaskArray"]):
         meta: tuple[np.ndarray[Any, _DType_co], ...] | None = None,
         **kwargs: Any,
     ) -> Any:
-        from dask.array.gufunc import apply_gufunc
+        from dask.array import apply_gufunc
 
         return apply_gufunc(
             func,
