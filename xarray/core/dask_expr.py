@@ -756,6 +756,9 @@ if HAS_EXPR_SUPPORT:
             Attributes from input dataset
         """
 
+        # Enable optimization traversal into input_var_exprs and input_coord_exprs tuples
+        _optimize_list_operands = True
+
         _parameters = [
             "func",
             "gname",
