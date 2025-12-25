@@ -4,7 +4,7 @@
 
 This plan describes how to integrate xarray with Dask's new expression-based computation system. The goal is to allow xarray's Dataset and DataArray to participate in Dask's expression optimization pipeline, enabling better performance when computing multiple xarray objects together or mixing xarray with dask arrays.
 
-**Status:** Phase 1 Complete
+**Status:** Phase 1 Complete, map_blocks support added
 
 **Implementation Notes (added during development):**
 
@@ -1199,6 +1199,124 @@ class TestExpressionOptimizations:
 5. **Distributed**: Any special considerations for dask.distributed?
 
 6. **Alternative backends**: How does this interact with other chunked array backends (cubed, etc.) via the ChunkManager abstraction?
+
+---
+
+## Known Issues (Discovered During Stress Testing)
+
+The following issues were discovered during stress testing with complex xarray workflows. These represent gaps in the current integration that need to be addressed.
+
+### Critical Issues
+
+#### 1. `map_blocks` Broken - Relies on HighLevelGraph ✓ FIXED
+
+```python
+ds.map_blocks(my_func)
+# Previously: AttributeError: 'Array' object has no attribute '__dask_layers__'
+# Now: Works correctly with expression-based arrays
+```
+
+**Cause**: xarray's `map_blocks` built a `HighLevelGraph` directly, which required `__dask_layers__` on input arrays. Expression-based dask arrays don't have this attribute.
+
+**Fix implemented**: Created new expression classes in `xarray/core/dask_expr.py`:
+
+- `MapBlocksSharedExpr`: Generates the shared wrapper tasks that call the user function
+- `MapBlocksVarExpr`: ArrayExpr that extracts individual output variables from wrapper results
+
+Modified `xarray/core/parallel.py` to detect expression-based arrays via `_uses_expr_arrays()` and route to `_map_blocks_expr()` which builds the expression tree instead of HighLevelGraph.
+
+**Key implementation details**:
+
+- `MapBlocksSharedExpr` stores expressions in flat tuples (`input_var_exprs`, `input_coord_exprs`) separate from metadata (`input_var_meta`, `input_coord_meta`)
+- This allows dask's optimizer to traverse the expressions automatically (dask walks tuples when `dependencies()` is overridden)
+- No custom `_simplify_down()` or `_lower()` needed - the optimizer handles it
+- `_layer()` uses `self.gname` for stable task keys
+- Wrapper tasks are keyed by `gname`, extraction tasks reference `gname` for consistency
+
+#### 2. Joint Compute Fails - `_ExprSequence` Missing xarray Attributes
+
+```python
+ds1 = xr.Dataset({"a": ...})
+ds2 = xr.Dataset({"b": ...})
+dask.compute(ds1, ds2)  # FAILS
+# AttributeError: '_ExprSequence' object has no attribute 'var_exprs'
+```
+
+**Cause**: When computing multiple xarray objects together, dask wraps them in `_ExprSequence`. The fusion code in `DatasetExprFinalize.fuse()` (line 551) assumes `self` has `var_exprs`, but `_ExprSequence` groups expressions by type and calls `fuse()` on a temporary sequence that doesn't have xarray-specific attributes.
+
+**Impact**: Cannot jointly compute multiple Datasets/DataArrays using `dask.compute()`. This undermines the main benefit of expression integration (shared subexpression optimization across collections).
+
+**Workaround**: Compute objects separately with `ds1.compute()`, `ds2.compute()` (loses joint optimization).
+
+**Location**: `xarray/core/dask_expr.py` line 551 (`fuse` method), `dask/_expr.py` line 1316 (`_ExprSequence.fuse`)
+
+**Potential fix**: The `fuse()` method needs to handle being called on `_ExprSequence` wrappers, not just direct xarray expression types. May need coordination with dask to allow custom fusion logic for mixed sequences.
+
+### Runtime Errors
+
+#### 3. Rolling with Chunks Smaller Than Window
+
+```python
+# ERA5-like data with per-timestep chunks
+data = da.random.random((100, 50, 100), chunks=(1, 50, 100))
+ds = xr.Dataset({"temp": (["time", "lat", "lon"], data)})
+ds.rolling(time=30, center=True).mean().compute()
+# ValueError: Moving window (=30) must between 1 and 29, inclusive
+```
+
+**Cause**: When chunk size along rolling dimension is smaller than window size, the rolling computation fails. This is common with Zarr data chunked by single timestep.
+
+**Impact**: Common time-series workflows with Zarr data fail without explicit rechunking.
+
+**Workaround**: Rechunk before rolling: `ds.chunk({'time': 30}).rolling(time=30).mean()`
+
+**Note**: This may be a dask-level issue with how rolling is lowered in expressions, not xarray-specific.
+
+#### 4. `to_netcdf` with `compute=False` - Tokenization Error
+
+```python
+ds.to_netcdf("file.nc", compute=False)
+# TokenizationError: Object <xarray.backends.netCDF4_.NetCDF4ArrayWrapper object at ...>
+# cannot be deterministically hashed.
+```
+
+**Cause**: NetCDF4 backend wrapper objects can't be tokenized by the expression system's deterministic hashing.
+
+**Impact**: Lazy writes to NetCDF fail. (`to_zarr` with `compute=False` works fine.)
+
+**Location**: Likely in `xarray/backends/netCDF4_.py`
+
+### Operations That Work Well
+
+The following operations were tested and work correctly:
+
+- Basic compute of single Dataset/DataArray
+- `map_blocks` (with expression-based path)
+- `groupby`, `resample` (with `use_flox=True`)
+- `rolling` (when chunk size >= window size)
+- `where`, `diff`, `coarsen`, `interp`
+- `weighted`, `dot`, `polyval`, `quantile`, `median`
+- `stack/unstack`, `transpose`, `expand_dims`, `squeeze`
+- `sel`, `isel`, `reindex`
+- `merge`, `combine_by_coords`, `combine_first`
+- `fillna`, `dropna`, `clip`
+- `ffill`, `bfill`, `cumsum`, `integrate`
+- `differentiate`, `broadcast_like`
+- Deep expression trees (50+ chained operations)
+- Large number of variables (100+ vars in single Dataset)
+- `to_zarr` with `compute=False`
+- Fusion and optimization of single-object graphs
+- Shared subexpression deduplication within single Dataset
+
+### Operations Not Yet Tested
+
+- `polyfit` (fitting, not just evaluation)
+- `curvefit`
+- `cov`, `corr` (correlation/covariance)
+- Complex multi-dimensional indexing
+- `broadcast` with explicit dims
+- `pad`
+- `shift`, `roll` (dimension shifting)
 
 ---
 
