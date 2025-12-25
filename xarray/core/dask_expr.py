@@ -50,51 +50,7 @@ if HAS_EXPR_SUPPORT:
     )
     from dask._task_spec import DataNode, Task, TaskRef
     from dask._task_spec import List as TaskList
-
-    def _simplify_expr(expr, lower: bool = False):
-        """Simplify an expression, optionally lowering to executable form.
-
-        Parameters
-        ----------
-        expr : Expr
-            The expression to simplify
-        lower : bool
-            If True, also lower the expression (needed for Finalize expressions
-            where array exprs need Rechunk -> executable tasks)
-        """
-        if not isinstance(expr, Expr):
-            return expr, False
-        result = expr.simplify()
-        if lower and hasattr(result, "lower_completely"):
-            result = result.lower_completely()
-        changed = result._name != expr._name
-        return result, changed
-
-    def _lower_expr(expr, lowered=None):
-        """Lower an expression one step.
-
-        Returns (lowered_expr, changed) tuple.
-        """
-        if not isinstance(expr, Expr):
-            return expr, False
-        if lowered is None:
-            lowered = {}
-        result = expr.lower_once(lowered)
-        changed = result._name != expr._name
-        return result, changed
-
-    def _transform_exprs(exprs, transform_fn):
-        """Apply a transform function to a sequence of expressions.
-
-        Returns (new_exprs, any_changed) tuple.
-        """
-        new_exprs = []
-        any_changed = False
-        for expr in exprs:
-            new_expr, changed = transform_fn(expr)
-            any_changed = any_changed or changed
-            new_exprs.append(new_expr)
-        return new_exprs, any_changed
+    from dask.array._array_expr._expr import ArrayExpr
 
     def _collect_expr_dependencies(*expr_sources):
         """Collect Expr objects from multiple sources (single exprs or tuples)."""
@@ -394,27 +350,7 @@ if HAS_EXPR_SUPPORT:
             """
             return {}
 
-        def _simplify_down(self):
-            """Simplify nested expressions."""
-            new_var_exprs, var_changed = _transform_exprs(
-                self.var_exprs, _simplify_expr
-            )
-            new_coord_exprs, coord_changed = _transform_exprs(
-                self.coord_exprs, _simplify_expr
-            )
-            if var_changed or coord_changed:
-                return DatasetExpr(
-                    var_names=self.var_names,
-                    var_exprs=tuple(new_var_exprs),
-                    coord_names=self.coord_names,
-                    coord_exprs=tuple(new_coord_exprs),
-                    non_chunked_vars=self.non_chunked_vars,
-                    non_chunked_coords=self.non_chunked_coords,
-                    dims=self.dims,
-                    var_dims=self.var_dims,
-                    attrs=self.attrs,
-                )
-            return None
+        # No _simplify_down or _lower needed - dask walks tuples when dependencies() is overridden
 
         def __dask_keys__(self) -> list:
             """Return keys for all chunked variables and coordinates.
@@ -463,26 +399,6 @@ if HAS_EXPR_SUPPORT:
                 attrs=self.attrs,
             )
 
-        def _lower(self):
-            """Lower nested array expressions."""
-            new_var_exprs, var_changed = _transform_exprs(self.var_exprs, _lower_expr)
-            new_coord_exprs, coord_changed = _transform_exprs(
-                self.coord_exprs, _lower_expr
-            )
-            if var_changed or coord_changed:
-                return DatasetExpr(
-                    var_names=self.var_names,
-                    var_exprs=tuple(new_var_exprs),
-                    coord_names=self.coord_names,
-                    coord_exprs=tuple(new_coord_exprs),
-                    non_chunked_vars=self.non_chunked_vars,
-                    non_chunked_coords=self.non_chunked_coords,
-                    dims=self.dims,
-                    var_dims=self.var_dims,
-                    attrs=self.attrs,
-                )
-            return None
-
         def _table(self):
             """Build rich tables for all variables."""
             tables = []
@@ -525,28 +441,7 @@ if HAS_EXPR_SUPPORT:
         def dependencies(self) -> list[Expr]:
             return _collect_expr_dependencies(self.var_exprs, self.coord_exprs)
 
-        def _simplify_down(self):
-            """Simplify and lower nested expressions."""
-            simplify_and_lower = lambda e: _simplify_expr(e, lower=True)
-            new_var_exprs, var_changed = _transform_exprs(
-                self.var_exprs, simplify_and_lower
-            )
-            new_coord_exprs, coord_changed = _transform_exprs(
-                self.coord_exprs, simplify_and_lower
-            )
-            if var_changed or coord_changed:
-                return DatasetExprFinalize(
-                    var_names=self.var_names,
-                    var_exprs=tuple(new_var_exprs),
-                    coord_names=self.coord_names,
-                    coord_exprs=tuple(new_coord_exprs),
-                    non_chunked_vars=self.non_chunked_vars,
-                    non_chunked_coords=self.non_chunked_coords,
-                    dims=self.dims,
-                    var_dims=self.var_dims,
-                    attrs=self.attrs,
-                )
-            return None
+        # No _simplify_down or _lower needed - dask walks tuples when dependencies() is overridden
 
         def fuse(self):
             """Fuse nested array expressions jointly to preserve sharing."""
@@ -565,26 +460,6 @@ if HAS_EXPR_SUPPORT:
                 var_dims=self.var_dims,
                 attrs=self.attrs,
             )
-
-        def _lower(self):
-            """Lower nested array expressions."""
-            new_var_exprs, var_changed = _transform_exprs(self.var_exprs, _lower_expr)
-            new_coord_exprs, coord_changed = _transform_exprs(
-                self.coord_exprs, _lower_expr
-            )
-            if var_changed or coord_changed:
-                return DatasetExprFinalize(
-                    var_names=self.var_names,
-                    var_exprs=tuple(new_var_exprs),
-                    coord_names=self.coord_names,
-                    coord_exprs=tuple(new_coord_exprs),
-                    non_chunked_vars=self.non_chunked_vars,
-                    non_chunked_coords=self.non_chunked_coords,
-                    dims=self.dims,
-                    var_dims=self.var_dims,
-                    attrs=self.attrs,
-                )
-            return None
 
         def _layer(self) -> dict:
             """Build layer with reconstruction task."""
@@ -694,23 +569,7 @@ if HAS_EXPR_SUPPORT:
             """Container node - no tasks of its own."""
             return {}
 
-        def _simplify_down(self):
-            """Simplify nested expressions."""
-            new_data_expr, data_changed = _simplify_expr(self.data_expr)
-            new_coord_exprs, coord_changed = _transform_exprs(
-                self.coord_exprs, _simplify_expr
-            )
-            if data_changed or coord_changed:
-                return DataArrayExpr(
-                    name=self.name,
-                    data_expr=new_data_expr,
-                    coord_names=self.coord_names,
-                    coord_exprs=tuple(new_coord_exprs),
-                    non_chunked_coords=self.non_chunked_coords,
-                    dims=self.dims,
-                    attrs=self.attrs,
-                )
-            return None
+        # No _simplify_down or _lower needed - dask walks tuples when dependencies() is overridden
 
         def __dask_keys__(self) -> list:
             keys = [list(self.data_expr.__dask_keys__())]
@@ -750,24 +609,6 @@ if HAS_EXPR_SUPPORT:
                 attrs=self.attrs,
             )
 
-        def _lower(self):
-            """Lower nested array expressions."""
-            new_data_expr, data_changed = _lower_expr(self.data_expr)
-            new_coord_exprs, coord_changed = _transform_exprs(
-                self.coord_exprs, _lower_expr
-            )
-            if data_changed or coord_changed:
-                return DataArrayExpr(
-                    name=self.name,
-                    data_expr=new_data_expr,
-                    coord_names=self.coord_names,
-                    coord_exprs=tuple(new_coord_exprs),
-                    non_chunked_coords=self.non_chunked_coords,
-                    dims=self.dims,
-                    attrs=self.attrs,
-                )
-            return None
-
         def _table(self):
             """Build rich table for the data array."""
             return ExprTable(_build_array_table(self.data_expr, self.dims))
@@ -797,24 +638,7 @@ if HAS_EXPR_SUPPORT:
         def dependencies(self) -> list[Expr]:
             return _collect_expr_dependencies(self.data_expr, self.coord_exprs)
 
-        def _simplify_down(self):
-            """Simplify and lower nested expressions."""
-            simplify_and_lower = lambda e: _simplify_expr(e, lower=True)
-            new_data_expr, data_changed = simplify_and_lower(self.data_expr)
-            new_coord_exprs, coord_changed = _transform_exprs(
-                self.coord_exprs, simplify_and_lower
-            )
-            if data_changed or coord_changed:
-                return DataArrayExprFinalize(
-                    name=self.name,
-                    data_expr=new_data_expr,
-                    coord_names=self.coord_names,
-                    coord_exprs=tuple(new_coord_exprs),
-                    non_chunked_coords=self.non_chunked_coords,
-                    dims=self.dims,
-                    attrs=self.attrs,
-                )
-            return None
+        # No _simplify_down or _lower needed - dask walks tuples when dependencies() is overridden
 
         def fuse(self):
             """Fuse nested array expressions jointly to preserve sharing."""
@@ -830,24 +654,6 @@ if HAS_EXPR_SUPPORT:
                 dims=self.dims,
                 attrs=self.attrs,
             )
-
-        def _lower(self):
-            """Lower nested array expressions."""
-            new_data_expr, data_changed = _lower_expr(self.data_expr)
-            new_coord_exprs, coord_changed = _transform_exprs(
-                self.coord_exprs, _lower_expr
-            )
-            if data_changed or coord_changed:
-                return DataArrayExprFinalize(
-                    name=self.name,
-                    data_expr=new_data_expr,
-                    coord_names=self.coord_names,
-                    coord_exprs=tuple(new_coord_exprs),
-                    non_chunked_coords=self.non_chunked_coords,
-                    dims=self.dims,
-                    attrs=self.attrs,
-                )
-            return None
 
         def _layer(self) -> dict:
             from dask.base import flatten
@@ -903,9 +709,350 @@ if HAS_EXPR_SUPPORT:
 
         return xr.DataArray(data, dims=dims, coords=coords, name=name, attrs=attrs)
 
+    # =========================================================================
+    # map_blocks expression classes
+    # =========================================================================
+
+    class MapBlocksSharedExpr(Expr):
+        """Expression representing the shared computation of a map_blocks operation.
+
+        This expression generates the tasks that call the user function on
+        each chunk of the input. Each task produces a dict/Dataset result.
+        Individual output variables are extracted by MapBlocksVarExpr.
+
+        Parameters
+        ----------
+        func : callable
+            The user function to apply
+        gname : str
+            Base name for output tasks (e.g., "my_func-abc123")
+        input_var_exprs : tuple[Expr, ...]
+            Expressions for each input variable (flat tuple for optimizer)
+        input_var_meta : tuple
+            Tuple of (var_name, dims, attrs) for each input variable
+        input_coord_exprs : tuple[Expr, ...]
+            Expressions for each input coordinate (flat tuple for optimizer)
+        input_coord_meta : tuple
+            Tuple of (coord_name, dims, attrs) for each input coordinate
+        non_chunked_info : tuple
+            Tuple of (name, dims, data, attrs, is_coord) for non-chunked variables
+        input_chunks : tuple
+            Chunk info from inputs as tuple of (dim, chunks) pairs
+        input_chunk_bounds : tuple
+            Chunk bounds as tuple of (dim, bounds) pairs
+        is_array_flags : tuple
+            Which args are DataArrays (for conversion)
+        expected_shapes : tuple
+            Expected output shapes as tuple of (dim, size) pairs
+        expected_data_vars : tuple
+            Expected data variable names
+        expected_coords : tuple
+            Expected coordinate names
+        indexes_info : tuple
+            Tuple of (name, index_token) for indexes
+        kwargs : dict
+            Keyword arguments to pass to func
+        dataset_attrs : dict | None
+            Attributes from input dataset
+        """
+
+        _parameters = [
+            "func",
+            "gname",
+            "input_var_exprs",
+            "input_var_meta",
+            "input_coord_exprs",
+            "input_coord_meta",
+            "non_chunked_info",
+            "input_chunks",
+            "input_chunk_bounds",
+            "is_array_flags",
+            "expected_shapes",
+            "expected_data_vars",
+            "expected_coords",
+            "indexes_info",
+            "kwargs",
+            "dataset_attrs",
+        ]
+        _defaults = {
+            "indexes_info": (),
+            "kwargs": None,
+            "dataset_attrs": None,
+        }
+
+        @functools.cached_property
+        def _name(self) -> str:
+            return f"{self.gname}-{self.deterministic_token}"
+
+        def dependencies(self) -> list[Expr]:
+            """Return input variable and coordinate expressions."""
+            deps = list(self.input_var_exprs) + list(self.input_coord_exprs)
+            return [d for d in deps if isinstance(d, Expr)]
+
+        def _layer(self) -> dict:
+            """Generate the shared map_blocks tasks.
+
+            These tasks call _wrapper and produce dicts of results.
+            """
+            from xarray.core.parallel import _wrapper
+
+            graph: dict = {}
+            input_chunks = dict(self.input_chunks)
+            input_chunk_bounds = dict(self.input_chunk_bounds)
+
+            # Build expected dict for _wrapper
+            expected_base: dict = {
+                "data_vars": set(self.expected_data_vars),
+                "coords": set(self.expected_coords),
+            }
+
+            # Coord names set
+            coord_names = {name for name, _, _ in self.input_coord_meta}
+            for name, _dims, _data, _attrs, is_coord in self.non_chunked_info:
+                if is_coord:
+                    coord_names.add(name)
+
+            # Iterate over all chunk combinations
+            ichunk = {dim: range(len(chunks)) for dim, chunks in input_chunks.items()}
+            import itertools
+
+            for chunk_tuple in itertools.product(*ichunk.values()):
+                chunk_index = dict(zip(ichunk.keys(), chunk_tuple, strict=True))
+
+                # Build blocked_args (the subset task references)
+                data_vars = []
+                coords = []
+
+                # Process chunked variables
+                for expr, (var_name, dims, attrs) in zip(
+                    self.input_var_exprs, self.input_var_meta, strict=True
+                ):
+                    expr_name = expr._name
+                    chunk_key = (expr_name,) + tuple(chunk_index[dim] for dim in dims)
+                    chunk_var_task = (
+                        f"{var_name}-{self.gname}-{expr_name!r}",
+                    ) + chunk_tuple
+                    graph[chunk_var_task] = (tuple, [dims, chunk_key, attrs])
+                    data_vars.append([var_name, chunk_var_task])
+
+                # Process chunked coordinates
+                for expr, (coord_name, dims, attrs) in zip(
+                    self.input_coord_exprs, self.input_coord_meta, strict=True
+                ):
+                    expr_name = expr._name
+                    chunk_key = (expr_name,) + tuple(chunk_index[dim] for dim in dims)
+                    chunk_var_task = (
+                        f"{coord_name}-{self.gname}-{expr_name!r}",
+                    ) + chunk_tuple
+                    graph[chunk_var_task] = (tuple, [dims, chunk_key, attrs])
+                    coords.append([coord_name, chunk_var_task])
+
+                # Process non-chunked variables
+                from xarray.core.parallel import _get_chunk_slicer
+
+                for name, dims, data, attrs, is_coord in self.non_chunked_info:
+                    # Subset the data for this chunk
+                    subsetter = {
+                        dim: _get_chunk_slicer(dim, chunk_index, input_chunk_bounds)
+                        for dim in dims
+                    }
+                    from dask.base import tokenize
+
+                    chunk_dims_set = set(chunk_index)
+                    if set(dims) < chunk_dims_set:
+                        this_var_chunk_tuple = tuple(chunk_index[dim] for dim in dims)
+                    else:
+                        this_var_chunk_tuple = chunk_tuple
+
+                    chunk_var_task = (
+                        f"{name}-{self.gname}-{tokenize(subsetter)}",
+                    ) + this_var_chunk_tuple
+
+                    # Only add if not already present (dimension coords)
+                    if len(dims) == 0 or chunk_var_task not in graph:
+                        if len(dims) == 0:
+                            subset_data = data
+                        else:
+                            import numpy as np
+
+                            slices = tuple(subsetter.get(d, slice(None)) for d in dims)
+                            if isinstance(data, np.ndarray):
+                                subset_data = data[slices]
+                            else:
+                                subset_data = data
+
+                        # For scalars, dims is ()
+                        subset_dims = dims
+                        graph[chunk_var_task] = (
+                            tuple,
+                            [subset_dims, subset_data, attrs],
+                        )
+
+                    if is_coord:
+                        coords.append([name, chunk_var_task])
+                    else:
+                        data_vars.append([name, chunk_var_task])
+
+                # Build expected for this chunk
+                expected = {
+                    **expected_base,
+                    "shapes": {
+                        k: input_chunks[k][v]
+                        for k, v in chunk_index.items()
+                        if k in self.expected_shapes
+                    },
+                }
+
+                # Build the index lookup dict for this chunk
+                indexes_dict = dict(self.indexes_info)
+
+                # Create the wrapper task
+                from xarray.core.dataset import Dataset
+
+                blocked_arg = (
+                    Dataset,
+                    (dict, data_vars),
+                    (dict, coords),
+                    self.dataset_attrs,
+                )
+                from_wrapper = (self.gname,) + chunk_tuple
+                graph[from_wrapper] = (
+                    _wrapper,
+                    self.func,
+                    [blocked_arg],
+                    self.kwargs if self.kwargs else {},
+                    self.is_array_flags,
+                    expected,
+                    indexes_dict,
+                )
+
+            return graph
+
+        def __dask_keys__(self) -> list:
+            """Return keys for all wrapper tasks."""
+            input_chunks = dict(self.input_chunks)
+            ichunk = {dim: range(len(chunks)) for dim, chunks in input_chunks.items()}
+            import itertools
+
+            return [
+                (self.gname,) + chunk_tuple
+                for chunk_tuple in itertools.product(*ichunk.values())
+            ]
+
+        # No need for _simplify_down or _lower - dask's optimizer now walks
+        # through tuples/lists looking for Exprs when we have custom dependencies()
+
+    class MapBlocksVarExpr(ArrayExpr):
+        """Expression for extracting one variable from a map_blocks result.
+
+        This is an ArrayExpr that represents one output variable
+        from the map_blocks operation.
+
+        Parameters
+        ----------
+        shared_expr : MapBlocksSharedExpr
+            The shared expression that generates the wrapper tasks
+        var_name : str
+            Name of the variable to extract
+        var_dims : tuple
+            Dimension names for this variable
+        chunks : tuple
+            Chunk sizes for each dimension
+        dtype : dtype
+            Data type of the output
+        meta_array : array-like
+            Metadata array (renamed from _meta to avoid conflict)
+        """
+
+        _parameters = [
+            "shared_expr",
+            "var_name",
+            "var_dims",
+            "chunks",
+            "dtype",
+            "meta_array",
+        ]
+
+        @functools.cached_property
+        def _name(self) -> str:
+            return f"{self.var_name}-{self.shared_expr._name}"
+
+        @functools.cached_property
+        def _meta(self):
+            """Return metadata array."""
+            return self.meta_array
+
+        @functools.cached_property
+        def shape(self):
+            from dask.utils import cached_cumsum
+
+            return tuple(cached_cumsum(c, initial_zero=True)[-1] for c in self.chunks)
+
+        @functools.cached_property
+        def ndim(self):
+            return len(self.shape)
+
+        @functools.cached_property
+        def npartitions(self):
+            """Total number of partitions (chunks)."""
+            from functools import reduce
+            from operator import mul
+
+            return reduce(mul, [len(c) for c in self.chunks], 1)
+
+        def dependencies(self) -> list[Expr]:
+            """Return the shared expression as dependency."""
+            return [self.shared_expr]
+
+        def _layer(self) -> dict:
+            """Generate getitem tasks to extract this variable."""
+            import operator
+
+            graph = {}
+            input_chunks = dict(self.shared_expr.input_chunks)
+            ichunk = {dim: range(len(chunks)) for dim, chunks in input_chunks.items()}
+
+            import itertools
+
+            for chunk_tuple in itertools.product(*ichunk.values()):
+                chunk_index = dict(zip(ichunk.keys(), chunk_tuple, strict=True))
+
+                # Build the output key for this variable
+                out_key = (self._name,) + tuple(
+                    chunk_index.get(dim, 0) for dim in self.var_dims
+                )
+
+                # Reference the shared task (use gname, which is the stable key)
+                from_wrapper = (self.shared_expr.gname,) + chunk_tuple
+
+                graph[out_key] = (operator.getitem, from_wrapper, self.var_name)
+
+            return graph
+
+        def __dask_keys__(self) -> list:
+            """Return keys for this variable's chunks."""
+            from itertools import product
+
+            return [
+                (self._name,) + block_id
+                for block_id in product(*[range(len(c)) for c in self.chunks])
+            ]
+
+        def finalize_compute(self):
+            """For compatibility with the finalize pattern."""
+            from dask.array._array_expr._expr import FinalizeComputeArray
+
+            return FinalizeComputeArray(self)
+
+        # No need for _simplify_down or _lower - shared_expr is a direct operand
+        # so dask's optimizer traverses it automatically
+
+
 else:
     # Fallback for older dask versions without expression support
     DatasetExpr = None  # type: ignore[misc, assignment]
     DataArrayExpr = None  # type: ignore[misc, assignment]
     DatasetExprFinalize = None  # type: ignore[misc, assignment]
     DataArrayExprFinalize = None  # type: ignore[misc, assignment]
+    MapBlocksSharedExpr = None  # type: ignore[misc, assignment]
+    MapBlocksVarExpr = None  # type: ignore[misc, assignment]

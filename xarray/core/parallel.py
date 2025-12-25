@@ -17,6 +17,150 @@ from xarray.core.variable import Variable
 from xarray.structure.alignment import align
 from xarray.structure.merge import merge
 
+
+def _uses_expr_arrays(obj: DataArray | Dataset) -> bool:
+    """Check if the object contains expression-based dask arrays."""
+    from xarray.core.dask_expr import HAS_EXPR_SUPPORT
+
+    if not HAS_EXPR_SUPPORT:
+        return False
+
+    if isinstance(obj, DataArray):
+        obj = obj._to_temp_dataset()
+
+    # Check if any variable has an expression
+    return any(hasattr(var._data, "expr") for var in obj.variables.values())
+
+
+def _map_blocks_expr(
+    func: Callable,
+    dataset: Dataset,
+    args: Sequence,
+    kwargs: Mapping,
+    is_array: Sequence[bool],
+    template: Dataset,
+    input_chunks: dict,
+    output_chunks: Mapping,
+    coordinates: Coordinates,
+) -> Dataset:
+    """Create map_blocks result using expression classes.
+
+    This is the expression-based implementation of map_blocks.
+    """
+    import dask
+    from dask._collections import new_collection
+
+    from xarray.core.dask_expr import MapBlocksSharedExpr, MapBlocksVarExpr
+
+    # Collect input variable expressions and metadata separately
+    # (flat tuples of Exprs for optimizer to traverse)
+    input_var_exprs = []
+    input_var_meta = []  # (name, dims, attrs)
+    input_coord_exprs = []
+    input_coord_meta = []  # (name, dims, attrs)
+    non_chunked_info = []
+
+    for name, var in dataset.variables.items():
+        is_coord = name in dataset._coord_names
+        dims = var.dims
+        attrs = dict(var.attrs) if var.attrs else {}
+
+        if hasattr(var._data, "expr"):
+            # Chunked variable with expression
+            expr = var._data.expr
+            if is_coord:
+                input_coord_exprs.append(expr)
+                input_coord_meta.append((name, dims, attrs))
+            else:
+                input_var_exprs.append(expr)
+                input_var_meta.append((name, dims, attrs))
+        else:
+            # Non-chunked variable
+            non_chunked_info.append((name, dims, var.values, attrs, is_coord))
+
+    # Build gname token
+    gname = f"{dask.utils.funcname(func)}-{dask.base.tokenize(dataset, args, kwargs)}"
+
+    # Convert chunks to tuples for expression parameters
+    input_chunks_tuple = tuple((dim, chunks) for dim, chunks in input_chunks.items())
+    input_chunk_bounds = {
+        dim: tuple(np.cumsum((0,) + chunks)) for dim, chunks in input_chunks.items()
+    }
+    input_chunk_bounds_tuple = tuple(input_chunk_bounds.items())
+
+    # Expected info
+    computed_variables = set(template.variables) - set(coordinates.indexes)
+    expected_shapes = tuple((dim, size) for dim, size in template.sizes.items())
+    expected_data_vars = tuple(template.data_vars.keys())
+    expected_coords = tuple(template.coords.keys())
+
+    # Create the shared expression
+    shared_expr = MapBlocksSharedExpr(
+        func=func,
+        gname=gname,
+        input_var_exprs=tuple(input_var_exprs),
+        input_var_meta=tuple(input_var_meta),
+        input_coord_exprs=tuple(input_coord_exprs),
+        input_coord_meta=tuple(input_coord_meta),
+        non_chunked_info=tuple(non_chunked_info),
+        input_chunks=input_chunks_tuple,
+        input_chunk_bounds=input_chunk_bounds_tuple,
+        is_array_flags=tuple(is_array),
+        expected_shapes=expected_shapes,
+        expected_data_vars=expected_data_vars,
+        expected_coords=expected_coords,
+        indexes_info=(),  # TODO: handle indexes properly
+        kwargs=dict(kwargs) if kwargs else None,
+        dataset_attrs=dict(dataset.attrs) if dataset.attrs else None,
+    )
+
+    # Create result Dataset
+    result = Dataset(coords=coordinates, attrs=template.attrs)
+
+    for index in result._indexes:
+        result[index].attrs = template[index].attrs
+        result[index].encoding = template[index].encoding
+
+    # Create MapBlocksVarExpr for each output variable
+    for name in computed_variables:
+        dims = template[name].dims
+        dtype = template[name].dtype
+
+        # Compute chunks for this variable
+        var_chunks = []
+        for dim in dims:
+            if dim in output_chunks:
+                var_chunks.append(output_chunks[dim])
+            elif dim in result._indexes:
+                var_chunks.append((result.sizes[dim],))
+            elif dim in template.dims:
+                var_chunks.append((template.sizes[dim],))
+
+        # Create meta array
+        from dask.array.utils import meta_from_array
+
+        meta = meta_from_array(np.array([], dtype=dtype))
+
+        # Create the variable expression
+        var_expr = MapBlocksVarExpr(
+            shared_expr=shared_expr,
+            var_name=name,
+            var_dims=dims,
+            chunks=tuple(var_chunks),
+            dtype=dtype,
+            meta_array=meta,
+        )
+
+        # Create dask array from expression
+        data = new_collection(var_expr)
+        result[name] = (dims, data, template[name].attrs)
+        result[name].encoding = template[name].encoding
+
+    result = result.set_coords(template._coord_names)
+
+    return result
+
+
 if TYPE_CHECKING:
     from xarray.core.types import T_Xarray
 
@@ -147,6 +291,66 @@ def make_dict(x: DataArray | Dataset) -> dict[Hashable, Any]:
         x = x._to_temp_dataset()
 
     return {k: v.data for k, v in x.variables.items()}
+
+
+def _wrapper(
+    func: Callable,
+    args: list,
+    kwargs: dict,
+    arg_is_array: Iterable[bool],
+    expected: ExpectedDict,
+    expected_indexes: dict[Hashable, Index],
+):
+    """
+    Wrapper function that receives datasets in args; converts to dataarrays when necessary;
+    passes these to the user function `func` and checks returned objects for expected shapes/sizes/etc.
+    """
+    converted_args = [
+        dataset_to_dataarray(arg) if is_array else arg
+        for is_array, arg in zip(arg_is_array, args, strict=True)
+    ]
+
+    result = func(*converted_args, **kwargs)
+
+    merged_coordinates = merge(
+        [arg.coords for arg in args if isinstance(arg, Dataset | DataArray)],
+        join="exact",
+        compat="override",
+    ).coords
+
+    # check all dims are present
+    missing_dimensions = set(expected["shapes"]) - set(result.sizes)
+    if missing_dimensions:
+        raise ValueError(f"Dimensions {missing_dimensions} missing on returned object.")
+
+    # check that index lengths and values are as expected
+    for name, index in result._indexes.items():
+        if (
+            name in expected["shapes"]
+            and result.sizes[name] != expected["shapes"][name]
+        ):
+            raise ValueError(
+                f"Received dimension {name!r} of length {result.sizes[name]}. "
+                f"Expected length {expected['shapes'][name]}."
+            )
+
+        # ChainMap wants MutableMapping, but xindexes is Mapping
+        merged_indexes = collections.ChainMap(
+            expected_indexes,
+            merged_coordinates.xindexes,  # type: ignore[arg-type]
+        )
+        expected_index = merged_indexes.get(name, None)
+        if expected_index is not None and not index.equals(expected_index):
+            raise ValueError(
+                f"Expected index {name!r} to be {expected_index!r}. Received {index!r} instead."
+            )
+
+    # check that all expected variables were returned
+    check_result_variables(result, expected, "coords")
+    if isinstance(result, Dataset):
+        check_result_variables(result, expected, "data_vars")
+
+    return make_dict(result)
 
 
 def _get_chunk_slicer(dim: Hashable, chunk_index: Mapping, chunk_bounds: Mapping):
@@ -330,68 +534,6 @@ def map_blocks(
         month    (time) int64 192B dask.array<chunksize=(24,), meta=np.ndarray>
     """
 
-    def _wrapper(
-        func: Callable,
-        args: list,
-        kwargs: dict,
-        arg_is_array: Iterable[bool],
-        expected: ExpectedDict,
-        expected_indexes: dict[Hashable, Index],
-    ):
-        """
-        Wrapper function that receives datasets in args; converts to dataarrays when necessary;
-        passes these to the user function `func` and checks returned objects for expected shapes/sizes/etc.
-        """
-
-        converted_args = [
-            dataset_to_dataarray(arg) if is_array else arg
-            for is_array, arg in zip(arg_is_array, args, strict=True)
-        ]
-
-        result = func(*converted_args, **kwargs)
-
-        merged_coordinates = merge(
-            [arg.coords for arg in args if isinstance(arg, Dataset | DataArray)],
-            join="exact",
-            compat="override",
-        ).coords
-
-        # check all dims are present
-        missing_dimensions = set(expected["shapes"]) - set(result.sizes)
-        if missing_dimensions:
-            raise ValueError(
-                f"Dimensions {missing_dimensions} missing on returned object."
-            )
-
-        # check that index lengths and values are as expected
-        for name, index in result._indexes.items():
-            if (
-                name in expected["shapes"]
-                and result.sizes[name] != expected["shapes"][name]
-            ):
-                raise ValueError(
-                    f"Received dimension {name!r} of length {result.sizes[name]}. "
-                    f"Expected length {expected['shapes'][name]}."
-                )
-
-            # ChainMap wants MutableMapping, but xindexes is Mapping
-            merged_indexes = collections.ChainMap(
-                expected_indexes,
-                merged_coordinates.xindexes,  # type: ignore[arg-type]
-            )
-            expected_index = merged_indexes.get(name, None)
-            if expected_index is not None and not index.equals(expected_index):
-                raise ValueError(
-                    f"Expected index {name!r} to be {expected_index!r}. Received {index!r} instead."
-                )
-
-        # check that all expected variables were returned
-        check_result_variables(result, expected, "coords")
-        if isinstance(result, Dataset):
-            check_result_variables(result, expected, "data_vars")
-
-        return make_dict(result)
-
     if template is not None and not isinstance(template, DataArray | Dataset):
         raise TypeError(
             f"template must be a DataArray or Dataset. Received {type(template).__name__} instead."
@@ -525,6 +667,25 @@ def map_blocks(
         raise TypeError(
             f"func output must be DataArray or Dataset; got {type(template)}"
         )
+
+    # Check if we should use expression-based computation
+    if _uses_expr_arrays(npargs[0]):
+        result = _map_blocks_expr(
+            func=func,
+            dataset=npargs[0],
+            args=args,
+            kwargs=kwargs,
+            is_array=is_array,
+            template=template,
+            input_chunks=input_chunks,
+            output_chunks=output_chunks,
+            coordinates=coordinates,
+        )
+        if result_is_array:
+            da = dataset_to_dataarray(result)
+            da.name = template_name
+            return da  # type: ignore[return-value]
+        return result  # type: ignore[return-value]
 
     # We're building a new HighLevelGraph hlg. We'll have one new layer
     # for each variable in the dataset, which is the result of the
