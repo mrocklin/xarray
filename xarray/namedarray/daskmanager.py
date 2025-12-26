@@ -128,7 +128,7 @@ class DaskManager(ChunkManagerEntrypoint["DaskArray"]):
         dtype: _DType_co | None = None,
         **kwargs: Any,
     ) -> DaskArray | Any:
-        from dask.array.reductions import cumreduction
+        from dask.array import cumreduction
 
         return cumreduction(
             func,
@@ -233,7 +233,7 @@ class DaskManager(ChunkManagerEntrypoint["DaskArray"]):
         *args: Any,  # can't type this as mypy assumes args are all same type, but dask unify_chunks args alternate types
         **kwargs: Any,
     ) -> tuple[dict[str, _NormalizedChunks], list[DaskArray]]:
-        from dask.array.core import unify_chunks
+        from dask.array import unify_chunks
 
         return unify_chunks(*args, **kwargs)  # type: ignore[no-any-return, no-untyped-call]
 
