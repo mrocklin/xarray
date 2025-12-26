@@ -96,6 +96,87 @@ if HAS_EXPR_SUPPORT:
         fused_iter = iter(fused)
         return [next(fused_iter) if hasattr(e, "fuse") else e for e in exprs]
 
+    def _fuse_xarray_sequence(seq):
+        """Fuse array expressions across multiple xarray expressions jointly.
+
+        When dask.compute(ds1, ds2) is called, _ExprSequence.fuse() calls
+        fuse.__func__(seq) where seq is an _ExprSequence of xarray expressions.
+        This function handles that case by collecting all array expressions,
+        fusing them jointly to preserve sharing, then reconstructing each operand.
+
+        Parameters
+        ----------
+        seq : _ExprSequence
+            Sequence of xarray expressions to fuse jointly
+
+        Returns
+        -------
+        _ExprSequence
+            Sequence of fused expressions
+        """
+        from dask._expr import _ExprSequence
+
+        # Collect all array exprs with their locations
+        all_exprs = []
+        expr_info = []  # Track structure for each operand
+
+        for op in seq.operands:
+            if hasattr(op, "var_exprs"):  # Dataset-style
+                var_count = len(op.var_exprs)
+                coord_count = len(op.coord_exprs)
+                all_exprs.extend(op.var_exprs)
+                all_exprs.extend(op.coord_exprs)
+                expr_info.append(("dataset", var_count, coord_count))
+            else:  # DataArray-style
+                all_exprs.append(op.data_expr)
+                coord_count = len(op.coord_exprs)
+                all_exprs.extend(op.coord_exprs)
+                expr_info.append(("dataarray", 1, coord_count))
+
+        # Fuse all expressions jointly
+        fused = _fuse_exprs(all_exprs)
+
+        # Reconstruct each operand with fused expressions, using its own type
+        fused_operands = []
+        fused_idx = 0
+        for op, (kind, var_count, coord_count) in zip(
+            seq.operands, expr_info, strict=True
+        ):
+            op_cls = type(op)
+            if kind == "dataset":
+                fused_vars = tuple(fused[fused_idx : fused_idx + var_count])
+                fused_idx += var_count
+                fused_coords = tuple(fused[fused_idx : fused_idx + coord_count])
+                fused_idx += coord_count
+                fused_op = op_cls(
+                    var_names=op.var_names,
+                    var_exprs=fused_vars,
+                    coord_names=op.coord_names,
+                    coord_exprs=fused_coords,
+                    non_chunked_vars=op.non_chunked_vars,
+                    non_chunked_coords=op.non_chunked_coords,
+                    dims=op.dims,
+                    var_dims=op.var_dims,
+                    attrs=op.attrs,
+                )
+            else:  # dataarray
+                fused_data = fused[fused_idx]
+                fused_idx += 1
+                fused_coords = tuple(fused[fused_idx : fused_idx + coord_count])
+                fused_idx += coord_count
+                fused_op = op_cls(
+                    name=op.name,
+                    data_expr=fused_data,
+                    coord_names=op.coord_names,
+                    coord_exprs=fused_coords,
+                    non_chunked_coords=op.non_chunked_coords,
+                    dims=op.dims,
+                    attrs=op.attrs,
+                )
+            fused_operands.append(fused_op)
+
+        return _ExprSequence(*fused_operands)
+
     # --- Visualization helpers ---
 
     def _format_shape(shape: tuple) -> str:
@@ -383,6 +464,12 @@ if HAS_EXPR_SUPPORT:
 
         def fuse(self):
             """Fuse nested array expressions jointly to preserve sharing."""
+            from dask._expr import _ExprSequence
+
+            # Handle joint compute: _ExprSequence.fuse() calls fuse.__func__(seq)
+            if isinstance(self, _ExprSequence):
+                return _fuse_xarray_sequence(self)
+
             n_vars = len(self.var_exprs)
             all_exprs = list(self.var_exprs) + list(self.coord_exprs)
             fused = _fuse_exprs(all_exprs)
@@ -445,6 +532,12 @@ if HAS_EXPR_SUPPORT:
 
         def fuse(self):
             """Fuse nested array expressions jointly to preserve sharing."""
+            from dask._expr import _ExprSequence
+
+            # Handle joint compute: _ExprSequence.fuse() calls fuse.__func__(seq)
+            if isinstance(self, _ExprSequence):
+                return _fuse_xarray_sequence(self)
+
             n_vars = len(self.var_exprs)
             all_exprs = list(self.var_exprs) + list(self.coord_exprs)
             fused = _fuse_exprs(all_exprs)
@@ -596,6 +689,12 @@ if HAS_EXPR_SUPPORT:
 
         def fuse(self):
             """Fuse nested array expressions jointly to preserve sharing."""
+            from dask._expr import _ExprSequence
+
+            # Handle joint compute: _ExprSequence.fuse() calls fuse.__func__(seq)
+            if isinstance(self, _ExprSequence):
+                return _fuse_xarray_sequence(self)
+
             all_exprs = [self.data_expr] + list(self.coord_exprs)
             fused = _fuse_exprs(all_exprs)
 
@@ -642,6 +741,12 @@ if HAS_EXPR_SUPPORT:
 
         def fuse(self):
             """Fuse nested array expressions jointly to preserve sharing."""
+            from dask._expr import _ExprSequence
+
+            # Handle joint compute: _ExprSequence.fuse() calls fuse.__func__(seq)
+            if isinstance(self, _ExprSequence):
+                return _fuse_xarray_sequence(self)
+
             all_exprs = [self.data_expr] + list(self.coord_exprs)
             fused = _fuse_exprs(all_exprs)
 

@@ -4,7 +4,7 @@
 
 This plan describes how to integrate xarray with Dask's new expression-based computation system. The goal is to allow xarray's Dataset and DataArray to participate in Dask's expression optimization pipeline, enabling better performance when computing multiple xarray objects together or mixing xarray with dask arrays.
 
-**Status:** Phase 1 Complete, map_blocks support added
+**Status:** Phase 1 Complete, map_blocks support added, joint compute fixed
 
 **Implementation Notes (added during development):**
 
@@ -1233,24 +1233,22 @@ Modified `xarray/core/parallel.py` to detect expression-based arrays via `_uses_
 - `_layer()` uses `self.gname` for stable task keys
 - Wrapper tasks are keyed by `gname`, extraction tasks reference `gname` for consistency
 
-#### 2. Joint Compute Fails - `_ExprSequence` Missing xarray Attributes
+#### 2. Joint Compute Fails - `_ExprSequence` Missing xarray Attributes ✓ FIXED
 
 ```python
 ds1 = xr.Dataset({"a": ...})
 ds2 = xr.Dataset({"b": ...})
-dask.compute(ds1, ds2)  # FAILS
-# AttributeError: '_ExprSequence' object has no attribute 'var_exprs'
+dask.compute(ds1, ds2)  # NOW WORKS
 ```
 
-**Cause**: When computing multiple xarray objects together, dask wraps them in `_ExprSequence`. The fusion code in `DatasetExprFinalize.fuse()` (line 551) assumes `self` has `var_exprs`, but `_ExprSequence` groups expressions by type and calls `fuse()` on a temporary sequence that doesn't have xarray-specific attributes.
+**Solution**: The `fuse()` methods in all xarray expression classes now detect when `self` is an `_ExprSequence` (dask calls `fuse.__func__(seq)` to pass the sequence as self). When this happens, `_fuse_xarray_sequence()` is called to:
 
-**Impact**: Cannot jointly compute multiple Datasets/DataArrays using `dask.compute()`. This undermines the main benefit of expression integration (shared subexpression optimization across collections).
+1. Collect all array expressions from all operands in the sequence
+2. Fuse them jointly using `_fuse_exprs()` to preserve shared subexpressions
+3. Reconstruct each operand with its fused expressions (using `type(op)` to handle mixed Dataset/DataArray sequences)
+4. Return a new `_ExprSequence` with the fused operands
 
-**Workaround**: Compute objects separately with `ds1.compute()`, `ds2.compute()` (loses joint optimization).
-
-**Location**: `xarray/core/dask_expr.py` line 551 (`fuse` method), `dask/_expr.py` line 1316 (`_ExprSequence.fuse`)
-
-**Potential fix**: The `fuse()` method needs to handle being called on `_ExprSequence` wrappers, not just direct xarray expression types. May need coordination with dask to allow custom fusion logic for mixed sequences.
+**Known limitation**: When computing xarray objects alongside raw dask arrays (`dask.compute(ds, arr)`), they are fused separately because `_ExprSequence.fuse()` groups by module. Shared subexpressions between xarray and raw dask arrays are not deduplicated.
 
 ### Runtime Errors
 
