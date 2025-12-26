@@ -851,6 +851,8 @@ if HAS_EXPR_SUPPORT:
             Chunk info from inputs as tuple of (dim, chunks) pairs
         input_chunk_bounds : tuple
             Chunk bounds as tuple of (dim, bounds) pairs
+        output_chunk_bounds : tuple
+            Output chunk bounds as tuple of (dim, bounds) pairs
         is_array_flags : tuple
             Which xarray args are DataArrays (for conversion)
         expected_shapes : tuple
@@ -859,8 +861,8 @@ if HAS_EXPR_SUPPORT:
             Expected data variable names
         expected_coords : tuple
             Expected coordinate names
-        indexes_info : tuple
-            Tuple of (name, index_token) for indexes
+        indexes_data : tuple
+            Tuple of (dim, xindex) for indexes that need validation
         kwargs : dict
             Keyword arguments to pass to func
         """
@@ -881,15 +883,16 @@ if HAS_EXPR_SUPPORT:
             "is_xarray_flags",
             "input_chunks",
             "input_chunk_bounds",
+            "output_chunk_bounds",
             "is_array_flags",
             "expected_shapes",
             "expected_data_vars",
             "expected_coords",
-            "indexes_info",
+            "indexes_data",
             "kwargs",
         ]
         _defaults = {
-            "indexes_info": (),
+            "indexes_data": (),
             "kwargs": None,
         }
 
@@ -919,6 +922,8 @@ if HAS_EXPR_SUPPORT:
             graph: dict = {}
             input_chunks = dict(self.input_chunks)
             input_chunk_bounds = dict(self.input_chunk_bounds)
+            output_chunk_bounds = dict(self.output_chunk_bounds)
+            indexes_data = dict(self.indexes_data)
 
             # Build expected dict for _wrapper
             expected_base: dict = {
@@ -1013,7 +1018,17 @@ if HAS_EXPR_SUPPORT:
                 }
 
                 # Build the index lookup dict for this chunk
-                indexes_dict = dict(self.indexes_info)
+                # Slice each modified index to get the expected values for this chunk
+                tokenized_indexes: list = []
+                for dim, xindex in indexes_data.items():
+                    chunk_slicer = _get_chunk_slicer(
+                        dim, chunk_index, output_chunk_bounds
+                    )
+                    sliced_index = xindex[chunk_slicer]
+                    tokenized_v = tokenize(sliced_index)
+                    index_key = f"{dim}-coordinate-{tokenized_v}"
+                    graph[index_key] = sliced_index
+                    tokenized_indexes.append([dim, index_key])
 
                 # Build blocked_args for all arguments in original order
                 blocked_args = []
@@ -1039,7 +1054,7 @@ if HAS_EXPR_SUPPORT:
                     self.kwargs if self.kwargs else {},
                     self.is_array_flags,
                     expected,
-                    indexes_dict,
+                    (dict, tokenized_indexes),
                 )
 
             return graph

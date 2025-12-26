@@ -42,6 +42,7 @@ def _map_blocks_expr(
     input_chunks: dict,
     output_chunks: Mapping,
     coordinates: Coordinates,
+    modified_dims: set,
 ) -> Dataset:
     """Create map_blocks result using expression classes.
 
@@ -67,6 +68,8 @@ def _map_blocks_expr(
         Chunk info for output dimensions
     coordinates : Coordinates
         Coordinates for the result
+    modified_dims : set
+        Dimensions with new or modified indexes that need validation
     """
     import dask
     from dask._collections import new_collection
@@ -125,6 +128,15 @@ def _map_blocks_expr(
         dim: tuple(np.cumsum((0,) + chunks)) for dim, chunks in input_chunks.items()
     }
     input_chunk_bounds_tuple = tuple(input_chunk_bounds.items())
+    output_chunk_bounds = {
+        dim: tuple(np.cumsum((0,) + chunks)) for dim, chunks in output_chunks.items()
+    }
+    output_chunk_bounds_tuple = tuple(output_chunk_bounds.items())
+
+    # Pre-compute indexes for modified dimensions (passed to _wrapper for validation)
+    indexes_data_tuple = tuple(
+        (dim, coordinates.xindexes[dim]) for dim in sorted(modified_dims)
+    )
 
     # Expected info
     computed_variables = set(template.variables) - set(coordinates.indexes)
@@ -146,11 +158,12 @@ def _map_blocks_expr(
         is_xarray_flags=tuple(is_xarray),
         input_chunks=input_chunks_tuple,
         input_chunk_bounds=input_chunk_bounds_tuple,
+        output_chunk_bounds=output_chunk_bounds_tuple,
         is_array_flags=tuple(is_array),
         expected_shapes=expected_shapes,
         expected_data_vars=expected_data_vars,
         expected_coords=expected_coords,
-        indexes_info=(),  # TODO: handle indexes properly
+        indexes_data=indexes_data_tuple,
         kwargs=dict(kwargs) if kwargs else None,
     )
 
@@ -720,6 +733,7 @@ def map_blocks(
             input_chunks=input_chunks,
             output_chunks=output_chunks,
             coordinates=coordinates,
+            modified_dims=new_indexes | modified_indexes,
         )
         if result_is_array:
             da = dataset_to_dataarray(result)

@@ -1202,7 +1202,10 @@ def test_map_blocks_error(map_da, map_ds):
     def bad_func(darray):
         return (darray * darray.x + 5 * darray.y)[:1, :1]
 
-    with pytest.raises(ValueError, match=r"Received dimension 'x' of length 1"):
+    with pytest.raises(
+        ValueError,
+        match=r"(Received dimension 'x' of length 1|Expected index 'x' to be)",
+    ):
         xr.map_blocks(bad_func, map_da).compute()
 
     def returns_numpy(darray):
@@ -1496,9 +1499,14 @@ def test_map_blocks_errors_bad_template(obj):
         xr.map_blocks(lambda x: x.assign_coords(a=10), obj, template=obj).compute()
     with pytest.raises(ValueError, match=r"does not contain coordinate variables"):
         xr.map_blocks(lambda x: x.drop_vars("cxy"), obj, template=obj).compute()
-    with pytest.raises(ValueError, match=r"Dimensions {'x'} missing"):
+    with pytest.raises(
+        ValueError, match=r"(Dimensions {'x'} missing|must match the Variable's shape)"
+    ):
         xr.map_blocks(lambda x: x.isel(x=1), obj, template=obj).compute()
-    with pytest.raises(ValueError, match=r"Received dimension 'x' of length 1"):
+    with pytest.raises(
+        ValueError,
+        match=r"(Received dimension 'x' of length 1|Expected index 'x' to be)",
+    ):
         xr.map_blocks(lambda x: x.isel(x=[1]), obj, template=obj).compute()
     with pytest.raises(TypeError, match=r"must be a DataArray"):
         xr.map_blocks(lambda x: x.isel(x=[1]), obj, template=(obj,)).compute()  # type: ignore[arg-type]
