@@ -34,10 +34,10 @@ def _uses_expr_arrays(obj: DataArray | Dataset) -> bool:
 
 def _map_blocks_expr(
     func: Callable,
-    dataset: Dataset,
-    args: Sequence,
-    kwargs: Mapping,
+    npargs: Sequence,
+    is_xarray: Sequence[bool],
     is_array: Sequence[bool],
+    kwargs: Mapping,
     template: Dataset,
     input_chunks: dict,
     output_chunks: Mapping,
@@ -46,6 +46,27 @@ def _map_blocks_expr(
     """Create map_blocks result using expression classes.
 
     This is the expression-based implementation of map_blocks.
+
+    Parameters
+    ----------
+    func : Callable
+        The user function to apply
+    npargs : Sequence
+        All arguments in order (xarray objects as Datasets, non-xarray as-is)
+    is_xarray : Sequence[bool]
+        Flags indicating which args are xarray objects
+    is_array : Sequence[bool]
+        Flags indicating which xarray args are DataArrays (vs Datasets)
+    kwargs : Mapping
+        Keyword arguments to pass to func
+    template : Dataset
+        Template for the output structure
+    input_chunks : dict
+        Chunk info for input dimensions
+    output_chunks : Mapping
+        Chunk info for output dimensions
+    coordinates : Coordinates
+        Coordinates for the result
     """
     import dask
     from dask._collections import new_collection
@@ -53,33 +74,50 @@ def _map_blocks_expr(
     from xarray.core.dask_expr import MapBlocksSharedExpr, MapBlocksVarExpr
 
     # Collect input variable expressions and metadata separately
-    # (flat tuples of Exprs for optimizer to traverse)
+    # Expressions must be at the top level (flat tuples) for dask optimizer traversal
+    # Metadata includes arg_idx to track which argument each expression belongs to
     input_var_exprs = []
-    input_var_meta = []  # (name, dims, attrs)
+    input_var_meta = []  # (arg_idx, name, dims, attrs)
     input_coord_exprs = []
-    input_coord_meta = []  # (name, dims, attrs)
-    non_chunked_info = []
+    input_coord_meta = []  # (arg_idx, name, dims, attrs)
+    non_chunked_info = []  # (arg_idx, name, dims, data, attrs, is_coord)
+    non_xarray_args = []  # (arg_idx, value) for non-xarray args
+    xarray_arg_attrs = []  # (arg_idx, attrs) for each xarray arg
 
-    for name, var in dataset.variables.items():
-        is_coord = name in dataset._coord_names
-        dims = var.dims
-        attrs = dict(var.attrs) if var.attrs else {}
+    for arg_idx, (arg, isxr) in enumerate(zip(npargs, is_xarray, strict=True)):
+        if not isxr:
+            # Non-xarray argument - store value directly
+            non_xarray_args.append((arg_idx, arg))
+            continue
 
-        if hasattr(var._data, "expr"):
-            # Chunked variable with expression
-            expr = var._data.expr
-            if is_coord:
-                input_coord_exprs.append(expr)
-                input_coord_meta.append((name, dims, attrs))
+        # Process xarray Dataset
+        dataset = arg
+        xarray_arg_attrs.append(
+            (arg_idx, dict(dataset.attrs) if dataset.attrs else None)
+        )
+
+        for name, var in dataset.variables.items():
+            is_coord = name in dataset._coord_names
+            dims = var.dims
+            attrs = dict(var.attrs) if var.attrs else {}
+
+            if hasattr(var._data, "expr"):
+                # Chunked variable with expression
+                expr = var._data.expr
+                if is_coord:
+                    input_coord_exprs.append(expr)
+                    input_coord_meta.append((arg_idx, name, dims, attrs))
+                else:
+                    input_var_exprs.append(expr)
+                    input_var_meta.append((arg_idx, name, dims, attrs))
             else:
-                input_var_exprs.append(expr)
-                input_var_meta.append((name, dims, attrs))
-        else:
-            # Non-chunked variable
-            non_chunked_info.append((name, dims, var.values, attrs, is_coord))
+                # Non-chunked variable
+                non_chunked_info.append(
+                    (arg_idx, name, dims, var.values, attrs, is_coord)
+                )
 
     # Build gname token
-    gname = f"{dask.utils.funcname(func)}-{dask.base.tokenize(dataset, args, kwargs)}"
+    gname = f"{dask.utils.funcname(func)}-{dask.base.tokenize(npargs, kwargs)}"
 
     # Convert chunks to tuples for expression parameters
     input_chunks_tuple = tuple((dim, chunks) for dim, chunks in input_chunks.items())
@@ -103,6 +141,9 @@ def _map_blocks_expr(
         input_coord_exprs=tuple(input_coord_exprs),
         input_coord_meta=tuple(input_coord_meta),
         non_chunked_info=tuple(non_chunked_info),
+        non_xarray_args=tuple(non_xarray_args),
+        xarray_arg_attrs=tuple(xarray_arg_attrs),
+        is_xarray_flags=tuple(is_xarray),
         input_chunks=input_chunks_tuple,
         input_chunk_bounds=input_chunk_bounds_tuple,
         is_array_flags=tuple(is_array),
@@ -111,7 +152,6 @@ def _map_blocks_expr(
         expected_coords=expected_coords,
         indexes_info=(),  # TODO: handle indexes properly
         kwargs=dict(kwargs) if kwargs else None,
-        dataset_attrs=dict(dataset.attrs) if dataset.attrs else None,
     )
 
     # Create result Dataset
@@ -672,10 +712,10 @@ def map_blocks(
     if _uses_expr_arrays(npargs[0]):
         result = _map_blocks_expr(
             func=func,
-            dataset=npargs[0],
-            args=args,
-            kwargs=kwargs,
+            npargs=npargs,
+            is_xarray=is_xarray,
             is_array=is_array,
+            kwargs=kwargs,
             template=template,
             input_chunks=input_chunks,
             output_chunks=output_chunks,

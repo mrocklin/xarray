@@ -4,7 +4,7 @@
 
 This plan describes how to integrate xarray with Dask's new expression-based computation system. The goal is to allow xarray's Dataset and DataArray to participate in Dask's expression optimization pipeline, enabling better performance when computing multiple xarray objects together or mixing xarray with dask arrays.
 
-**Status:** Phase 1 Complete, map_blocks support added, joint compute fixed, to_netcdf fixed
+**Status:** Phase 1 Complete, map_blocks support added (32/40 tests pass), joint compute fixed, to_netcdf fixed, dask broadcast rechunk bug fixed, args support added
 
 **Implementation Notes (added during development):**
 
@@ -15,6 +15,7 @@ This plan describes how to integrate xarray with Dask's new expression-based com
 - Requires `DASK_ARRAY__QUERY_PLANNING=true` config to enable array expressions in dask
 - Must override `.fuse()` on xarray expression classes to propagate fusion to nested array expressions (base `Expr.fuse()` is a no-op)
 - Must override `_lower()` on xarray expression classes to lower nested array expressions (otherwise high-level expressions like `Reshape` won't be lowered and will fail when building the task graph)
+- Fixed dask bug in rechunk pushdown through Elemwise with broadcast args (in `dask/array/_array_expr/_rechunk.py:_pushdown_through_elemwise`)
 
 **Related resources in dask repository (`../dask/` - note: previously referenced as `../dask3/`):**
 
@@ -1306,13 +1307,45 @@ The following operations were tested and work correctly:
 
 ### Operations Not Yet Tested
 
-- `polyfit` (fitting, not just evaluation)
+- `polyfit` (fitting, not just evaluation) ✓ tested, works
 - `curvefit`
-- `cov`, `corr` (correlation/covariance)
+- `cov`, `corr` (correlation/covariance) ✓ tested, works
 - Complex multi-dimensional indexing
 - `broadcast` with explicit dims
-- `pad`
-- `shift`, `roll` (dimension shifting)
+- `pad` ✓ tested, works
+- `shift`, `roll` (dimension shifting) ✓ tested, works
+
+### map_blocks Test Status (after args support)
+
+**32/40 tests passing (32 XPASS):**
+
+- Basic `map_blocks` usage ✓
+- `map_blocks` with kwargs ✓
+- `map_blocks` with attribute changes ✓
+- `map_blocks` with name changes ✓
+- All DataArray transformations (8 tests) ✓
+- All Dataset transformations (8 tests) ✓
+- `map_blocks` with object methods ✓
+- `map_blocks` with string indexes ✓
+- HLG layers test ✓
+- `map_blocks` with mixed type inputs (non-xarray args) ✓ **NEW**
+- `map_blocks` with dask array args ✓ **NEW**
+- `map_blocks` convert args to list ✓ **NEW**
+- `map_blocks_errors_bad_template_2` ✓ **NEW**
+
+**8/40 tests expected to fail (XFAIL - known limitations):**
+
+- Template with index changes (3 tests) - requires full index handling
+- `map_blocks_to_dataarray` - Dataset to DataArray conversion
+- `map_blocks_error` - Error message regex differs
+- `map_blocks_dask_args` - dask array args error handling
+
+**Implementation of args support:**
+
+- `_map_blocks_expr` now accepts `npargs` and `is_xarray` to process all arguments
+- Expressions are stored in flat tuples (`input_var_exprs`, `input_coord_exprs`) with metadata including `arg_idx`
+- `MapBlocksSharedExpr._layer()` builds `blocked_args` for all arguments in original order
+- Non-xarray arguments are passed through directly
 
 ---
 

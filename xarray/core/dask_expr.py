@@ -834,19 +834,25 @@ if HAS_EXPR_SUPPORT:
         input_var_exprs : tuple[Expr, ...]
             Expressions for each input variable (flat tuple for optimizer)
         input_var_meta : tuple
-            Tuple of (var_name, dims, attrs) for each input variable
+            Tuple of (arg_idx, var_name, dims, attrs) for each input variable
         input_coord_exprs : tuple[Expr, ...]
             Expressions for each input coordinate (flat tuple for optimizer)
         input_coord_meta : tuple
-            Tuple of (coord_name, dims, attrs) for each input coordinate
+            Tuple of (arg_idx, coord_name, dims, attrs) for each input coordinate
         non_chunked_info : tuple
-            Tuple of (name, dims, data, attrs, is_coord) for non-chunked variables
+            Tuple of (arg_idx, name, dims, data, attrs, is_coord) for non-chunked variables
+        non_xarray_args : tuple
+            Tuple of (arg_idx, value) for non-xarray arguments
+        xarray_arg_attrs : tuple
+            Tuple of (arg_idx, attrs) for each xarray argument's Dataset attrs
+        is_xarray_flags : tuple
+            Which args are xarray objects (for reconstruction)
         input_chunks : tuple
             Chunk info from inputs as tuple of (dim, chunks) pairs
         input_chunk_bounds : tuple
             Chunk bounds as tuple of (dim, bounds) pairs
         is_array_flags : tuple
-            Which args are DataArrays (for conversion)
+            Which xarray args are DataArrays (for conversion)
         expected_shapes : tuple
             Expected output shapes as tuple of (dim, size) pairs
         expected_data_vars : tuple
@@ -857,8 +863,6 @@ if HAS_EXPR_SUPPORT:
             Tuple of (name, index_token) for indexes
         kwargs : dict
             Keyword arguments to pass to func
-        dataset_attrs : dict | None
-            Attributes from input dataset
         """
 
         # Enable optimization traversal into input_var_exprs and input_coord_exprs tuples
@@ -872,6 +876,9 @@ if HAS_EXPR_SUPPORT:
             "input_coord_exprs",
             "input_coord_meta",
             "non_chunked_info",
+            "non_xarray_args",
+            "xarray_arg_attrs",
+            "is_xarray_flags",
             "input_chunks",
             "input_chunk_bounds",
             "is_array_flags",
@@ -880,12 +887,10 @@ if HAS_EXPR_SUPPORT:
             "expected_coords",
             "indexes_info",
             "kwargs",
-            "dataset_attrs",
         ]
         _defaults = {
             "indexes_info": (),
             "kwargs": None,
-            "dataset_attrs": None,
         }
 
         @functools.cached_property
@@ -902,7 +907,14 @@ if HAS_EXPR_SUPPORT:
 
             These tasks call _wrapper and produce dicts of results.
             """
-            from xarray.core.parallel import _wrapper
+            import itertools
+            from collections import defaultdict
+
+            import numpy as np
+            from dask.base import tokenize
+
+            from xarray.core.dataset import Dataset
+            from xarray.core.parallel import _get_chunk_slicer, _wrapper
 
             graph: dict = {}
             input_chunks = dict(self.input_chunks)
@@ -914,57 +926,53 @@ if HAS_EXPR_SUPPORT:
                 "coords": set(self.expected_coords),
             }
 
-            # Coord names set
-            coord_names = {name for name, _, _ in self.input_coord_meta}
-            for name, _dims, _data, _attrs, is_coord in self.non_chunked_info:
-                if is_coord:
-                    coord_names.add(name)
+            # Build lookup dicts for attrs and non-xarray args
+            xarray_attrs_dict = dict(self.xarray_arg_attrs)
+            non_xarray_dict = dict(self.non_xarray_args)
+
+            # Number of total args
+            n_args = len(self.is_xarray_flags)
 
             # Iterate over all chunk combinations
             ichunk = {dim: range(len(chunks)) for dim, chunks in input_chunks.items()}
-            import itertools
 
             for chunk_tuple in itertools.product(*ichunk.values()):
                 chunk_index = dict(zip(ichunk.keys(), chunk_tuple, strict=True))
 
-                # Build blocked_args (the subset task references)
-                data_vars = []
-                coords = []
+                # Build data_vars and coords grouped by arg_idx
+                data_vars_by_arg = defaultdict(list)
+                coords_by_arg = defaultdict(list)
 
                 # Process chunked variables
-                for expr, (var_name, dims, attrs) in zip(
+                for expr, (arg_idx, var_name, dims, attrs) in zip(
                     self.input_var_exprs, self.input_var_meta, strict=True
                 ):
                     expr_name = expr._name
                     chunk_key = (expr_name,) + tuple(chunk_index[dim] for dim in dims)
                     chunk_var_task = (
-                        f"{var_name}-{self.gname}-{expr_name!r}",
+                        f"{var_name}-{self.gname}-{arg_idx}-{expr_name!r}",
                     ) + chunk_tuple
                     graph[chunk_var_task] = (tuple, [dims, chunk_key, attrs])
-                    data_vars.append([var_name, chunk_var_task])
+                    data_vars_by_arg[arg_idx].append([var_name, chunk_var_task])
 
                 # Process chunked coordinates
-                for expr, (coord_name, dims, attrs) in zip(
+                for expr, (arg_idx, coord_name, dims, attrs) in zip(
                     self.input_coord_exprs, self.input_coord_meta, strict=True
                 ):
                     expr_name = expr._name
                     chunk_key = (expr_name,) + tuple(chunk_index[dim] for dim in dims)
                     chunk_var_task = (
-                        f"{coord_name}-{self.gname}-{expr_name!r}",
+                        f"{coord_name}-{self.gname}-{arg_idx}-{expr_name!r}",
                     ) + chunk_tuple
                     graph[chunk_var_task] = (tuple, [dims, chunk_key, attrs])
-                    coords.append([coord_name, chunk_var_task])
+                    coords_by_arg[arg_idx].append([coord_name, chunk_var_task])
 
                 # Process non-chunked variables
-                from xarray.core.parallel import _get_chunk_slicer
-
-                for name, dims, data, attrs, is_coord in self.non_chunked_info:
-                    # Subset the data for this chunk
+                for arg_idx, name, dims, data, attrs, is_coord in self.non_chunked_info:
                     subsetter = {
                         dim: _get_chunk_slicer(dim, chunk_index, input_chunk_bounds)
                         for dim in dims
                     }
-                    from dask.base import tokenize
 
                     chunk_dims_set = set(chunk_index)
                     if set(dims) < chunk_dims_set:
@@ -973,33 +981,26 @@ if HAS_EXPR_SUPPORT:
                         this_var_chunk_tuple = chunk_tuple
 
                     chunk_var_task = (
-                        f"{name}-{self.gname}-{tokenize(subsetter)}",
+                        f"{name}-{self.gname}-{arg_idx}-{tokenize(subsetter)}",
                     ) + this_var_chunk_tuple
 
-                    # Only add if not already present (dimension coords)
+                    # Only add if not already present
                     if len(dims) == 0 or chunk_var_task not in graph:
                         if len(dims) == 0:
                             subset_data = data
                         else:
-                            import numpy as np
-
                             slices = tuple(subsetter.get(d, slice(None)) for d in dims)
                             if isinstance(data, np.ndarray):
                                 subset_data = data[slices]
                             else:
                                 subset_data = data
 
-                        # For scalars, dims is ()
-                        subset_dims = dims
-                        graph[chunk_var_task] = (
-                            tuple,
-                            [subset_dims, subset_data, attrs],
-                        )
+                        graph[chunk_var_task] = (tuple, [dims, subset_data, attrs])
 
                     if is_coord:
-                        coords.append([name, chunk_var_task])
+                        coords_by_arg[arg_idx].append([name, chunk_var_task])
                     else:
-                        data_vars.append([name, chunk_var_task])
+                        data_vars_by_arg[arg_idx].append([name, chunk_var_task])
 
                 # Build expected for this chunk
                 expected = {
@@ -1014,20 +1015,27 @@ if HAS_EXPR_SUPPORT:
                 # Build the index lookup dict for this chunk
                 indexes_dict = dict(self.indexes_info)
 
-                # Create the wrapper task
-                from xarray.core.dataset import Dataset
+                # Build blocked_args for all arguments in original order
+                blocked_args = []
+                for arg_idx in range(n_args):
+                    if self.is_xarray_flags[arg_idx]:
+                        # xarray argument - build Dataset tuple
+                        blocked_arg = (
+                            Dataset,
+                            (dict, data_vars_by_arg[arg_idx]),
+                            (dict, coords_by_arg[arg_idx]),
+                            xarray_attrs_dict.get(arg_idx),
+                        )
+                        blocked_args.append(blocked_arg)
+                    else:
+                        # non-xarray argument - use value directly
+                        blocked_args.append(non_xarray_dict[arg_idx])
 
-                blocked_arg = (
-                    Dataset,
-                    (dict, data_vars),
-                    (dict, coords),
-                    self.dataset_attrs,
-                )
                 from_wrapper = (self.gname,) + chunk_tuple
                 graph[from_wrapper] = (
                     _wrapper,
                     self.func,
-                    [blocked_arg],
+                    blocked_args,
                     self.kwargs if self.kwargs else {},
                     self.is_array_flags,
                     expected,
