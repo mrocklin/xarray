@@ -97,6 +97,20 @@ class BaseNetCDF4Array(BackendArray):
             if self.datastore.autoclose:
                 self.datastore.close(needs_lock=False)
 
+    def __dask_tokenize__(self):
+        # Tokenize based on file path, variable name, group, and array metadata
+        # This enables deterministic hashing for dask expressions
+        from dask.base import tokenize
+
+        return tokenize(
+            type(self).__name__,
+            self.datastore._filename,
+            self.datastore._group,
+            self.variable_name,
+            self.shape,
+            self.dtype,
+        )
+
     def get_array(self, needs_lock=True):
         raise NotImplementedError("Virtual Method")
 

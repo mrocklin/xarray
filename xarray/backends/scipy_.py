@@ -72,6 +72,24 @@ class ScipyArrayWrapper(BackendArray):
         self.shape = array.shape
         self.dtype = np.dtype(array.dtype.kind + str(array.dtype.itemsize))
 
+    def __dask_tokenize__(self):
+        # Tokenize based on file path, variable name, and array metadata
+        # This enables deterministic hashing for dask expressions
+        from dask.base import tokenize
+
+        # Get filename from the file manager if available
+        manager = self.datastore._manager
+        filename = (
+            getattr(manager, "_args", (None,))[0] if hasattr(manager, "_args") else None
+        )
+        return tokenize(
+            type(self).__name__,
+            filename,
+            self.variable_name,
+            self.shape,
+            self.dtype,
+        )
+
     def get_variable(self, needs_lock=True):
         ds = self.datastore._manager.acquire(needs_lock)
         return ds.variables[self.variable_name]

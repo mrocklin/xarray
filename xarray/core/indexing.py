@@ -699,6 +699,11 @@ class ImplicitToExplicitIndexingAdapter(NDArrayMixin):
             # scalars.
             return result
 
+    def __dask_tokenize__(self):
+        from dask.base import tokenize
+
+        return tokenize(type(self).__name__, self.array, self.indexer_cls)
+
 
 class LazilyIndexedArray(ExplicitlyIndexedNDArrayMixin):
     """Wrap an array to make basic and outer indexing lazy."""
@@ -777,6 +782,11 @@ class LazilyIndexedArray(ExplicitlyIndexedNDArrayMixin):
 
     def transpose(self, order):
         return LazilyVectorizedIndexedArray(self.array, self.key).transpose(order)
+
+    def __dask_tokenize__(self):
+        from dask.base import tokenize
+
+        return tokenize(type(self).__name__, self.array, self.key.tuple)
 
     def _oindex_get(self, indexer: OuterIndexer):
         return type(self)(self.array, self._updated_key(indexer))
@@ -934,6 +944,11 @@ class CopyOnWriteArray(ExplicitlyIndexedNDArrayMixin):
 
     def transpose(self, order):
         return self.array.transpose(order)
+
+    def __dask_tokenize__(self):
+        from dask.base import tokenize
+
+        return tokenize(type(self).__name__, self.array)
 
     def _vindex_set(self, indexer: VectorizedIndexer, value: Any) -> None:
         self._ensure_copied()

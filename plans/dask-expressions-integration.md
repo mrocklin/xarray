@@ -4,7 +4,7 @@
 
 This plan describes how to integrate xarray with Dask's new expression-based computation system. The goal is to allow xarray's Dataset and DataArray to participate in Dask's expression optimization pipeline, enabling better performance when computing multiple xarray objects together or mixing xarray with dask arrays.
 
-**Status:** Phase 1 Complete, map_blocks support added, joint compute fixed
+**Status:** Phase 1 Complete, map_blocks support added, joint compute fixed, to_netcdf fixed
 
 **Implementation Notes (added during development):**
 
@@ -1270,19 +1270,17 @@ ds.rolling(time=30, center=True).mean().compute()
 
 **Note**: This may be a dask-level issue with how rolling is lowered in expressions, not xarray-specific.
 
-#### 4. `to_netcdf` with `compute=False` - Tokenization Error
+#### 4. `to_netcdf` with `compute=False` - Tokenization Error ✓ FIXED
 
 ```python
-ds.to_netcdf("file.nc", compute=False)
-# TokenizationError: Object <xarray.backends.netCDF4_.NetCDF4ArrayWrapper object at ...>
-# cannot be deterministically hashed.
+ds.to_netcdf("file.nc", compute=False)  # NOW WORKS
 ```
 
-**Cause**: NetCDF4 backend wrapper objects can't be tokenized by the expression system's deterministic hashing.
+**Solution**: Added `__dask_tokenize__` methods to backend array wrappers and indexing adapters:
 
-**Impact**: Lazy writes to NetCDF fail. (`to_zarr` with `compute=False` works fine.)
-
-**Location**: Likely in `xarray/backends/netCDF4_.py`
+- `BaseNetCDF4Array` - tokenizes based on filename, group, variable name, shape, dtype
+- `ScipyArrayWrapper` - tokenizes based on filename, variable name, shape, dtype
+- `LazilyIndexedArray`, `CopyOnWriteArray`, `ImplicitToExplicitIndexingAdapter` - tokenize based on wrapped array
 
 ### Operations That Work Well
 
