@@ -641,12 +641,14 @@ if HAS_EXPR_SUPPORT:
             "data_expr",
             "coord_names",
             "coord_exprs",
+            "coord_dims",
             "non_chunked_coords",
             "dims",
             "attrs",
         ]
         _defaults = {
             "name": None,
+            "coord_dims": (),
             "non_chunked_coords": {},
             "attrs": None,
         }
@@ -682,6 +684,7 @@ if HAS_EXPR_SUPPORT:
                     e.finalize_compute() if hasattr(e, "finalize_compute") else e
                     for e in self.coord_exprs
                 ),
+                coord_dims=self.coord_dims,
                 non_chunked_coords=self.non_chunked_coords,
                 dims=self.dims,
                 attrs=self.attrs,
@@ -703,6 +706,7 @@ if HAS_EXPR_SUPPORT:
                 data_expr=fused[0],
                 coord_names=self.coord_names,
                 coord_exprs=tuple(fused[1:]),
+                coord_dims=self.coord_dims,
                 non_chunked_coords=self.non_chunked_coords,
                 dims=self.dims,
                 attrs=self.attrs,
@@ -720,12 +724,14 @@ if HAS_EXPR_SUPPORT:
             "data_expr",
             "coord_names",
             "coord_exprs",
+            "coord_dims",
             "non_chunked_coords",
             "dims",
             "attrs",
         ]
         _defaults = {
             "name": None,
+            "coord_dims": (),
             "non_chunked_coords": {},
             "attrs": None,
         }
@@ -755,6 +761,7 @@ if HAS_EXPR_SUPPORT:
                 data_expr=fused[0],
                 coord_names=self.coord_names,
                 coord_exprs=tuple(fused[1:]),
+                coord_dims=self.coord_dims,
                 non_chunked_coords=self.non_chunked_coords,
                 dims=self.dims,
                 attrs=self.attrs,
@@ -781,6 +788,7 @@ if HAS_EXPR_SUPPORT:
                     TaskList(*[TaskRef(k) for k in coord_keys]),
                     DataNode(None, self.name),
                     DataNode(None, self.coord_names),
+                    DataNode(None, self.coord_dims),
                     DataNode(None, self.non_chunked_coords),
                     DataNode(None, self.dims),
                     DataNode(None, self.attrs),
@@ -795,6 +803,7 @@ if HAS_EXPR_SUPPORT:
         coord_arrays: list,
         name: str | None,
         coord_names: tuple[str, ...],
+        coord_dims: tuple[tuple[str, ...], ...],
         non_chunked_coords: dict,
         dims: tuple[str, ...],
         attrs: dict | None,
@@ -802,8 +811,12 @@ if HAS_EXPR_SUPPORT:
         """Rebuild DataArray from computed numpy array."""
         import xarray as xr
 
-        # Build coords dict
-        coords = dict(zip(coord_names, coord_arrays, strict=True))
+        # Build coords dict with dimension info for chunked coords
+        coords = {}
+        for cname, cdims, carr in zip(
+            coord_names, coord_dims, coord_arrays, strict=True
+        ):
+            coords[cname] = (cdims, carr) if cdims else carr
         # Add non-chunked coordinates
         coords.update(
             {

@@ -4,7 +4,7 @@
 
 This plan describes how to integrate xarray with Dask's new expression-based computation system. The goal is to allow xarray's Dataset and DataArray to participate in Dask's expression optimization pipeline, enabling better performance when computing multiple xarray objects together or mixing xarray with dask arrays.
 
-**Status:** Phase 1 Complete, map_blocks support added (32/40 tests pass), joint compute fixed, to_netcdf fixed, dask broadcast rechunk bug fixed, args support added
+**Status:** Phase 1 Complete, map_blocks fully working (40/40 tests pass), joint compute fixed, to_netcdf fixed, template index validation added
 
 **Implementation Notes (added during development):**
 
@@ -1315,9 +1315,9 @@ The following operations were tested and work correctly:
 - `pad` ✓ tested, works
 - `shift`, `roll` (dimension shifting) ✓ tested, works
 
-### map_blocks Test Status (after import fixes)
+### map_blocks Test Status (after template index fix)
 
-**33/40 tests passing (33 XPASS):**
+**40/40 tests passing:**
 
 - Basic `map_blocks` usage ✓
 - `map_blocks` with kwargs ✓
@@ -1331,13 +1331,19 @@ The following operations were tested and work correctly:
 - `map_blocks` with mixed type inputs (non-xarray args) ✓
 - `map_blocks` with dask array args ✓
 - `map_blocks` convert args to list ✓
+- `map_blocks_errors_bad_template` ✓
 - `map_blocks_errors_bad_template_2` ✓
+- Template with index changes ✓
+- `map_blocks_to_dataarray` ✓
+- `map_blocks_template_convert_object` ✓
 
-**7/40 tests expected to fail (XFAIL - known limitations):**
+### Template Index Validation
 
-- Template with index changes (5 tests) - requires full index handling
-- `map_blocks_to_dataarray` - Dataset to DataArray conversion
-- `map_blocks_template_convert_object` - type conversion in output
+Added proper template index handling to expression-based map_blocks:
+
+- Pass `output_chunk_bounds` and `indexes_data` to `MapBlocksSharedExpr`
+- Slice template indexes per chunk in `_layer()` for validation
+- Enables proper error messages when output doesn't match template
 
 ### Performance Validation
 
@@ -1358,8 +1364,8 @@ All major features verified working with expression arrays:
 
 ### Full Test Suite Results
 
-- test_dask.py: 158 passed, 37 xpassed, 24 xfailed, 2 skipped
-- test_dask_expr.py: 27 passed
+- test_dask.py + test_dask_expr.py: 185 passed, 44 xpassed, 17 xfailed, 2 skipped
+- 44 tests that were expected to fail with expression arrays now pass
 
 ### Import Fix
 

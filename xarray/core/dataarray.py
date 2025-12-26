@@ -1128,12 +1128,14 @@ class DataArray(
         # Collect chunked coordinates
         coord_names = []
         coord_exprs = []
+        coord_dims = []
         non_chunked_coords = {}
 
         for name, coord in self.coords.items():
             if hasattr(coord.variable._data, "expr"):
                 coord_names.append(name)
                 coord_exprs.append(coord.variable._data.expr)
+                coord_dims.append(coord.dims)
             else:
                 dims = coord.dims
                 non_chunked_coords[name] = (dims, coord.values)
@@ -1143,6 +1145,7 @@ class DataArray(
             data_expr=self.variable._data.expr,
             coord_names=tuple(coord_names),
             coord_exprs=tuple(coord_exprs),
+            coord_dims=tuple(coord_dims),
             non_chunked_coords=non_chunked_coords,
             dims=self.dims,
             attrs=dict(self.attrs) if self.attrs else None,
