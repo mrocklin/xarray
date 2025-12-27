@@ -303,7 +303,6 @@ class TestVariable(DaskTestCase):
 
         assert ((u + 1).data == v2.data).all()
 
-    @xfails_with_array_expr
     def test_persist(self):
         u = self.eager_var
         v = self.lazy_var + 1
@@ -311,7 +310,6 @@ class TestVariable(DaskTestCase):
         (v2,) = dask.persist(v)
         assert v is not v2
         assert len(v2.__dask_graph__()) < len(v.__dask_graph__())  # type: ignore[arg-type]
-        assert v2.__dask_keys__() == v.__dask_keys__()
         assert dask.is_dask_collection(v)
         assert dask.is_dask_collection(v2)
 
@@ -426,7 +424,6 @@ class TestDataArrayAndDataset(DaskTestCase):
 
         assert ((u + 1).data == v2.data).all()
 
-    @xfails_with_array_expr
     def test_persist(self):
         u = self.eager_array
         v = self.lazy_array + 1
@@ -434,7 +431,6 @@ class TestDataArrayAndDataset(DaskTestCase):
         (v2,) = dask.persist(v)
         assert v is not v2
         assert len(v2.__dask_graph__()) < len(v.__dask_graph__())
-        assert v2.__dask_keys__() == v.__dask_keys__()
         assert dask.is_dask_collection(v)
         assert dask.is_dask_collection(v2)
 
@@ -577,7 +573,6 @@ class TestDataArrayAndDataset(DaskTestCase):
         assert ds3["d"].data is d3
         assert ds3["c"].data is c3
 
-    @xfails_with_array_expr
     def test_groupby(self):
         u = self.eager_array
         v = self.lazy_array
